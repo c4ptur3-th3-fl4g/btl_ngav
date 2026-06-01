@@ -9,12 +9,16 @@ from datetime import datetime, timezone
 from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Dict, List, Optional
+import threading
+
+from file_monitor import FileEvent, watch_paths
 from urllib import error, parse, request
 
 import joblib
 import psutil
 import yaml
 import pandas as pd
+import os
 
 from process_monitor import ProcessEvent, ProcessSnapshot, diff_process_state, scan_processes
 
@@ -456,17 +460,51 @@ def run_realtime_loop(cfg: AgentConfig, one_shot: bool = False) -> None:
         current = next_state
 
 
+def _start_file_watcher(cfg: AgentConfig, paths: List[str], interval_seconds: float = 1.0) -> threading.Thread:
+    def _on_event(ev: FileEvent) -> None:
+        try:
+            ts = datetime.now(timezone.utc).isoformat()
+            subject = f"[NGAV] File {ev.event_type} on {cfg.endpoint_name}: {ev.path}"
+            body_lines = [
+                f"Time (UTC): {ts}",
+                f"Endpoint: {cfg.endpoint_name}",
+                f"Event: {ev.event_type}",
+                f"Path: {ev.path}",
+            ]
+            try:
+                st = os.stat(ev.path)
+                body_lines.append(f"Size: {st.st_size}")
+                body_lines.append(f"MTime: {st.st_mtime}")
+            except Exception:
+                pass
+
+            body = "\n".join(body_lines)
+            dispatch_alert(cfg, subject, body)
+        except Exception:
+            pass
+
+    thread = threading.Thread(target=watch_paths, args=(paths, interval_seconds, _on_event), daemon=True)
+    thread.start()
+    return thread
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Basic cross-platform NGAV agent")
     parser.add_argument("--config", required=True, help="Path to YAML config file")
     parser.add_argument("--once", action="store_true", help="Run one scan only")
     parser.add_argument("--realtime", action="store_true", help="Follow process events in realtime")
+    parser.add_argument("--watch-paths", help="Comma-separated paths or directories to watch for file events")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     cfg = load_config(Path(args.config).resolve())
+    # start file watcher if requested
+    if getattr(args, "watch_paths", None):
+        paths = [p.strip() for p in args.watch_paths.split(",") if p.strip()]
+        if paths:
+            _start_file_watcher(cfg, paths)
     if args.realtime:
         run_realtime_loop(cfg, one_shot=args.once)
     else:
