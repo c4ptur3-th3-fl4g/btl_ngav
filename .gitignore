@@ -2,3 +2,5 @@
 .gitignore
 /agent/__pycache__
 agent/config.yaml
+config/config.yaml
+/models
