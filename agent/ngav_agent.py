@@ -12,6 +12,7 @@ from typing import Dict, List, Optional
 import threading
 
 from file_monitor import FileEvent, watch_paths
+from network_monitor import NetworkSample, watch_network
 from urllib import error, parse, request
 
 import joblib
@@ -60,6 +61,7 @@ class AgentConfig:
     email: EmailConfig
     telegram: TelegramConfig
     discord: DiscordConfig
+    network_bandwidth_threshold: Optional[float]
 
 
 def safe(callable_obj, default=None):
@@ -113,6 +115,7 @@ def load_config(config_path: Path) -> AgentConfig:
         email=email_cfg,
         telegram=telegram_cfg,
         discord=discord_cfg,
+        network_bandwidth_threshold=(lambda v: float(v) if v else None)(raw.get("network", {}).get("bandwidth_threshold_bytes")),
     )
     return cfg
 
@@ -488,12 +491,43 @@ def _start_file_watcher(cfg: AgentConfig, paths: List[str], interval_seconds: fl
     return thread
 
 
+def _start_network_watcher(cfg: AgentConfig, interval_seconds: float = 1.0) -> threading.Thread:
+    def _on_sample(sample: NetworkSample) -> None:
+        try:
+            # sample.interfaces: iface -> metrics
+            ts = datetime.now(timezone.utc).isoformat()
+            for iface, metrics in sample.interfaces.items():
+                sent = metrics.get("bytes_sent_per_sec", 0.0)
+                recv = metrics.get("bytes_recv_per_sec", 0.0)
+                # optional threshold check
+                thr = cfg.network_bandwidth_threshold
+                if thr is not None and max(sent, recv) < thr:
+                    continue
+
+                subject = f"[NGAV] Network spike on {cfg.endpoint_name}: {iface}"
+                body = (
+                    f"Time (UTC): {ts}\n"
+                    f"Endpoint: {cfg.endpoint_name}\n"
+                    f"Interface: {iface}\n"
+                    f"bytes_sent_per_sec: {sent:.2f}\n"
+                    f"bytes_recv_per_sec: {recv:.2f}\n"
+                )
+                dispatch_alert(cfg, subject, body)
+        except Exception:
+            pass
+
+    thread = threading.Thread(target=watch_network, args=(interval_seconds, _on_sample), daemon=True)
+    thread.start()
+    return thread
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Basic cross-platform NGAV agent")
     parser.add_argument("--config", required=True, help="Path to YAML config file")
     parser.add_argument("--once", action="store_true", help="Run one scan only")
     parser.add_argument("--realtime", action="store_true", help="Follow process events in realtime")
     parser.add_argument("--watch-paths", help="Comma-separated paths or directories to watch for file events")
+    parser.add_argument("--monitor-network", action="store_true", help="Enable network interface monitoring")
     return parser.parse_args()
 
 
@@ -505,6 +539,8 @@ def main() -> None:
         paths = [p.strip() for p in args.watch_paths.split(",") if p.strip()]
         if paths:
             _start_file_watcher(cfg, paths)
+    if getattr(args, "monitor_network", False):
+        _start_network_watcher(cfg, interval_seconds=cfg.scan_interval_seconds)
     if args.realtime:
         run_realtime_loop(cfg, one_shot=args.once)
     else:
