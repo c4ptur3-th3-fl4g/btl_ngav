@@ -1,13 +1,8 @@
-secure-smtplib
 psutil
-watchdog
 numpy
 pandas
 scikit-learn
 joblib
 pyyaml
-networkx
 matplotlib
-pefile
-pyelftools
 jupyter

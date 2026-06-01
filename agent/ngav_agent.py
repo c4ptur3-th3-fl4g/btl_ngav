@@ -16,6 +16,8 @@ import psutil
 import yaml
 import pandas as pd
 
+from process_monitor import ProcessEvent, ProcessSnapshot, diff_process_state, scan_processes
+
 
 @dataclass
 class EmailConfig:
@@ -156,6 +158,34 @@ def extract_process_record(proc: psutil.Process) -> Optional[Dict]:
     }
 
 
+def snapshot_to_record(snapshot: ProcessSnapshot) -> Dict:
+    lower_exe = snapshot.exe.lower()
+    if platform.system().lower() == "windows":
+        is_system_path = int("\\windows\\system32" in lower_exe or "\\windows\\syswow64" in lower_exe)
+    else:
+        is_system_path = int(lower_exe.startswith("/usr/") or lower_exe.startswith("/bin/") or lower_exe.startswith("/sbin/"))
+
+    is_temp_path = int("\\temp\\" in lower_exe or "/tmp/" in lower_exe)
+
+    return {
+        "pid": snapshot.pid,
+        "ppid": snapshot.ppid,
+        "name": snapshot.name,
+        "exe": snapshot.exe,
+        "username": snapshot.username,
+        "status": snapshot.status,
+        "create_time": snapshot.create_time,
+        "cpu_percent": 0.0,
+        "memory_rss": 0,
+        "num_threads": 0,
+        "num_fds": -1,
+        "cmdline_len": len(snapshot.cmdline),
+        "is_system_path": is_system_path,
+        "is_temp_path": is_temp_path,
+        "platform": platform.system().lower(),
+    }
+
+
 def collect_snapshot(cfg: AgentConfig) -> pd.DataFrame:
     rows: List[Dict] = []
     include_patterns = cfg.include_process_name_patterns
@@ -259,6 +289,61 @@ def dispatch_alert(cfg: AgentConfig, subject: str, body: str) -> None:
     send_discord_alert(cfg.discord, subject, body)
 
 
+def build_feature_frame_from_records(records: List[Dict], feature_columns: List[str]) -> pd.DataFrame:
+    df = pd.DataFrame(records)
+    if df.empty:
+        return df
+
+    for column in feature_columns:
+        if column not in df.columns:
+            df[column] = None
+
+    return df[feature_columns]
+
+
+def score_record(
+    cfg: AgentConfig,
+    pipeline,
+    feature_columns: List[str],
+    record: Dict,
+    threshold: float,
+    alerted_until: Dict[str, float],
+) -> Optional[float]:
+    frame = build_feature_frame_from_records([record], feature_columns)
+    if frame.empty:
+        return None
+
+    score = float(-pipeline.decision_function(frame)[0])
+    if score <= threshold:
+        return score
+
+    now = time.time()
+    key = f"{record.get('name')}|{record.get('exe')}|{record.get('pid')}"
+    next_allowed = alerted_until.get(key, 0.0)
+    if now < next_allowed:
+        return score
+
+    body = (
+        f"Time (UTC): {datetime.now(timezone.utc).isoformat()}\n"
+        f"Endpoint: {cfg.endpoint_name}\n"
+        f"Event score: {score:.6f}\n"
+        f"Threshold: {threshold:.6f}\n\n"
+        f"Process details:\n"
+        f"- pid: {record.get('pid')}\n"
+        f"- ppid: {record.get('ppid')}\n"
+        f"- name: {record.get('name')}\n"
+        f"- exe: {record.get('exe')}\n"
+        f"- username: {record.get('username')}\n"
+        f"- status: {record.get('status')}\n"
+        f"- cmdline_len: {record.get('cmdline_len')}\n"
+        f"- platform: {record.get('platform')}"
+    )
+    subject = f"[NGAV] Suspicious process on {cfg.endpoint_name}: {record.get('name')}"
+    dispatch_alert(cfg, subject, body)
+    alerted_until[key] = now + cfg.cooldown_seconds
+    return score
+
+
 def format_alert(endpoint_name: str, row: pd.Series, score: float, threshold: float) -> str:
     ts = datetime.now(timezone.utc).isoformat()
     lines = [
@@ -332,17 +417,60 @@ def run_loop(cfg: AgentConfig, one_shot: bool = False) -> None:
         time.sleep(cfg.scan_interval_seconds)
 
 
+def run_realtime_loop(cfg: AgentConfig, one_shot: bool = False) -> None:
+    bundle = joblib.load(cfg.model_path)
+    pipeline = bundle["pipeline"]
+    feature_columns = bundle["feature_columns"]
+    bundle_threshold = float(bundle["threshold"])
+    threshold = float(cfg.score_threshold) if cfg.score_threshold is not None else bundle_threshold
+
+    print(f"[info] Loaded model bundle from {cfg.model_path}")
+    print(f"[info] Running in realtime mode on endpoint: {cfg.endpoint_name}")
+    print(f"[info] Effective threshold: {threshold:.6f}")
+
+    alerted_until: Dict[str, float] = {}
+    current = scan_processes()
+
+    for snapshot in current.values():
+        record = snapshot_to_record(snapshot)
+        score_record(cfg, pipeline, feature_columns, record, threshold, alerted_until)
+
+    if one_shot:
+        return
+
+    while True:
+        time.sleep(cfg.scan_interval_seconds)
+        next_state = scan_processes()
+        events = diff_process_state(current, next_state)
+        for event in events:
+            if event.event_type not in {"started", "updated"}:
+                continue
+
+            record = snapshot_to_record(event.snapshot)
+            score = score_record(cfg, pipeline, feature_columns, record, threshold, alerted_until)
+            print(
+                f"[info] {datetime.now().isoformat()} event={event.event_type} pid={record.get('pid')} "
+                f"name={record.get('name')} score={score:.6f}"
+            )
+
+        current = next_state
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Basic cross-platform NGAV agent")
     parser.add_argument("--config", required=True, help="Path to YAML config file")
     parser.add_argument("--once", action="store_true", help="Run one scan only")
+    parser.add_argument("--realtime", action="store_true", help="Follow process events in realtime")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     cfg = load_config(Path(args.config).resolve())
-    run_loop(cfg, one_shot=args.once)
+    if args.realtime:
+        run_realtime_loop(cfg, one_shot=args.once)
+    else:
+        run_loop(cfg, one_shot=args.once)
 
 
 if __name__ == "__main__":
