@@ -4,7 +4,7 @@ score_threshold: null
 model_path: ../models/ngav.pkl
 
 email:
-  enabled: true
+  enabled: false
   smtp_server: smtp.gmail.com
   smtp_port: 587
   use_tls: true
@@ -13,6 +13,15 @@ email:
   from: your_email@gmail.com
   to:
     - soc_team@example.com
+
+telegram:
+  enabled: true
+  bot_token: 1234567890:your_telegram_bot_token
+  chat_id: "-1001234567890"
+
+discord:
+  enabled: true
+  webhook_url: https://discord.com/api/webhooks/your_webhook_id/your_webhook_token
 
 agent:
   endpoint_name: auto

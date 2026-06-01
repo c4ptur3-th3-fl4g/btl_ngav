@@ -1,4 +1,5 @@
 import argparse
+import json
 import platform
 import socket
 import smtplib
@@ -8,6 +9,7 @@ from datetime import datetime, timezone
 from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Dict, List, Optional
+from urllib import error, parse, request
 
 import joblib
 import psutil
@@ -28,6 +30,19 @@ class EmailConfig:
 
 
 @dataclass
+class TelegramConfig:
+    enabled: bool
+    bot_token: str
+    chat_id: str
+
+
+@dataclass
+class DiscordConfig:
+    enabled: bool
+    webhook_url: str
+
+
+@dataclass
 class AgentConfig:
     scan_interval_seconds: int
     cooldown_seconds: int
@@ -37,6 +52,8 @@ class AgentConfig:
     include_process_name_patterns: List[str]
     exclude_process_names: List[str]
     email: EmailConfig
+    telegram: TelegramConfig
+    discord: DiscordConfig
 
 
 def safe(callable_obj, default=None):
@@ -51,6 +68,8 @@ def load_config(config_path: Path) -> AgentConfig:
         raw = yaml.safe_load(f) or {}
 
     email_raw = raw.get("email", {})
+    telegram_raw = raw.get("telegram", {})
+    discord_raw = raw.get("discord", {})
     endpoint_name = raw.get("agent", {}).get("endpoint_name", "auto")
     if endpoint_name == "auto":
         endpoint_name = socket.gethostname()
@@ -66,6 +85,17 @@ def load_config(config_path: Path) -> AgentConfig:
         to_addrs=list(email_raw.get("to", [])),
     )
 
+    telegram_cfg = TelegramConfig(
+        enabled=bool(telegram_raw.get("enabled", False)),
+        bot_token=telegram_raw.get("bot_token", ""),
+        chat_id=str(telegram_raw.get("chat_id", "")),
+    )
+
+    discord_cfg = DiscordConfig(
+        enabled=bool(discord_raw.get("enabled", False)),
+        webhook_url=discord_raw.get("webhook_url", ""),
+    )
+
     cfg = AgentConfig(
         scan_interval_seconds=int(raw.get("scan_interval_seconds", 20)),
         cooldown_seconds=int(raw.get("cooldown_seconds", 600)),
@@ -75,6 +105,8 @@ def load_config(config_path: Path) -> AgentConfig:
         include_process_name_patterns=[p.lower() for p in raw.get("agent", {}).get("include_process_name_patterns", [])],
         exclude_process_names=[p.lower() for p in raw.get("agent", {}).get("exclude_process_names", [])],
         email=email_cfg,
+        telegram=telegram_cfg,
+        discord=discord_cfg,
     )
     return cfg
 
@@ -170,6 +202,63 @@ def send_email_alert(email_cfg: EmailConfig, subject: str, body: str) -> None:
         server.sendmail(email_cfg.from_addr, email_cfg.to_addrs, msg.as_string())
 
 
+def send_telegram_alert(telegram_cfg: TelegramConfig, subject: str, body: str) -> None:
+    if not telegram_cfg.enabled:
+        return
+
+    if not (telegram_cfg.bot_token and telegram_cfg.chat_id):
+        print("[warn] Telegram is enabled but config is incomplete.")
+        return
+
+    text = f"{subject}\n\n{body}"
+    payload = parse.urlencode({
+        "chat_id": telegram_cfg.chat_id,
+        "text": text,
+    }).encode("utf-8")
+    url = f"https://api.telegram.org/bot{telegram_cfg.bot_token}/sendMessage"
+    req = request.Request(url, data=payload, method="POST")
+
+    try:
+        with request.urlopen(req, timeout=20) as response:
+            if response.status >= 400:
+                print(f"[warn] Telegram alert failed with status={response.status}")
+    except error.URLError as ex:
+        print(f"[warn] Telegram alert error: {ex}")
+
+
+def send_discord_alert(discord_cfg: DiscordConfig, subject: str, body: str) -> None:
+    if not discord_cfg.enabled:
+        return
+
+    if not discord_cfg.webhook_url:
+        print("[warn] Discord is enabled but webhook_url is empty.")
+        return
+
+    payload = {
+        "content": f"**{subject}**\\n```\\n{body}\\n```"
+    }
+    payload_bytes = json.dumps(payload).encode("utf-8")
+    req = request.Request(
+        discord_cfg.webhook_url,
+        data=payload_bytes,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with request.urlopen(req, timeout=20) as response:
+            if response.status >= 400:
+                print(f"[warn] Discord alert failed with status={response.status}")
+    except error.URLError as ex:
+        print(f"[warn] Discord alert error: {ex}")
+
+
+def dispatch_alert(cfg: AgentConfig, subject: str, body: str) -> None:
+    send_email_alert(cfg.email, subject, body)
+    send_telegram_alert(cfg.telegram, subject, body)
+    send_discord_alert(cfg.discord, subject, body)
+
+
 def format_alert(endpoint_name: str, row: pd.Series, score: float, threshold: float) -> str:
     ts = datetime.now(timezone.utc).isoformat()
     lines = [
@@ -235,7 +324,7 @@ def run_loop(cfg: AgentConfig, one_shot: bool = False) -> None:
 
                 body = format_alert(cfg.endpoint_name, row, float(row["anomaly_score"]), threshold)
                 subject = f"[NGAV] Suspicious process on {cfg.endpoint_name}: {row.get('name')}"
-                send_email_alert(cfg.email, subject, body)
+                dispatch_alert(cfg, subject, body)
                 alerted_until[key] = now + cfg.cooldown_seconds
 
         if one_shot:
