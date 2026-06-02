@@ -9,10 +9,12 @@ import pandas as pd
 
 
 DEFAULT_MODEL_PATH = Path(__file__).resolve().parents[1] / "models" / "ngav.pkl"
+DEFAULT_BEHAVIOR_MODEL_PATH = Path(__file__).resolve().parents[1] / "models" / "behavior_model.pkl"
 
 
 @dataclass
 class Detection:
+    model_name: str
     endpoint: Optional[str]
     event_id: Optional[str]
     event_type: Optional[str]
@@ -23,6 +25,7 @@ class Detection:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "model_name": self.model_name,
             "endpoint": self.endpoint,
             "event_id": self.event_id,
             "event_type": self.event_type,
@@ -33,36 +36,55 @@ class Detection:
         }
 
 
+@dataclass
+class ModelRunner:
+    name: str
+    path: Path
+    pipeline: Any
+    feature_columns: List[str]
+    threshold: float
+
+
 class NgavDetector:
-    def __init__(self, model_path: Path = DEFAULT_MODEL_PATH, threshold: Optional[float] = None) -> None:
-        self.model_path = Path(model_path).resolve()
-        bundle = joblib.load(self.model_path)
-        self.pipeline = bundle["pipeline"]
-        self.feature_columns = list(bundle["feature_columns"])
-        self.threshold = float(threshold) if threshold is not None else float(bundle["threshold"])
+    def __init__(
+        self,
+        model_path: Optional[Path] = None,
+        threshold: Optional[float] = None,
+        include_behavior_model: bool = True,
+    ) -> None:
+        model_paths = [Path(model_path).resolve()] if model_path else [DEFAULT_MODEL_PATH]
+        if include_behavior_model and DEFAULT_BEHAVIOR_MODEL_PATH.exists():
+            behavior_path = DEFAULT_BEHAVIOR_MODEL_PATH.resolve()
+            if behavior_path not in [path.resolve() for path in model_paths]:
+                model_paths.append(behavior_path)
+
+        self.models = [_load_model_runner(path, threshold=threshold) for path in model_paths]
+        if not self.models:
+            raise ValueError("no NGAV models were loaded")
 
     def detect_event(self, event: Dict[str, Any]) -> List[Detection]:
         records = list(_extract_records(event))
         if not records:
             return []
 
-        frame = _build_feature_frame(records, self.feature_columns)
-        scores = -self.pipeline.decision_function(frame)
-
         detections: List[Detection] = []
-        for record, score in zip(records, scores):
-            score_value = float(score)
-            detections.append(
-                Detection(
-                    endpoint=event.get("endpoint") or record.get("endpoint"),
-                    event_id=event.get("id"),
-                    event_type=event.get("event_type"),
-                    score=score_value,
-                    threshold=self.threshold,
-                    is_anomaly=score_value > self.threshold,
-                    record=record,
+        for model in self.models:
+            frame = _build_feature_frame(records, model.feature_columns)
+            scores = -model.pipeline.decision_function(frame)
+            for record, score in zip(records, scores):
+                score_value = float(score)
+                detections.append(
+                    Detection(
+                        model_name=model.name,
+                        endpoint=event.get("endpoint") or record.get("endpoint"),
+                        event_id=event.get("id"),
+                        event_type=event.get("event_type"),
+                        score=score_value,
+                        threshold=model.threshold,
+                        is_anomaly=score_value > model.threshold,
+                        record=record,
+                    )
                 )
-            )
         return detections
 
     def detect_events(self, events: Iterable[Dict[str, Any]]) -> List[Detection]:
@@ -70,6 +92,19 @@ class NgavDetector:
         for event in events:
             detections.extend(self.detect_event(event))
         return detections
+
+
+def _load_model_runner(path: Path, threshold: Optional[float] = None) -> ModelRunner:
+    resolved_path = Path(path).resolve()
+    bundle = joblib.load(resolved_path)
+    model_name = resolved_path.stem
+    return ModelRunner(
+        name=model_name,
+        path=resolved_path,
+        pipeline=bundle["pipeline"],
+        feature_columns=list(bundle["feature_columns"]),
+        threshold=float(threshold) if threshold is not None else float(bundle["threshold"]),
+    )
 
 
 def _extract_records(event: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
@@ -118,12 +153,21 @@ def load_events(path: Path) -> List[Dict[str, Any]]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Score collector JSONL events with the trained NGAV model")
     parser.add_argument("events_file", help="Path to collector events.jsonl")
-    parser.add_argument("--model", default=str(DEFAULT_MODEL_PATH), help="Path to trained NGAV model bundle")
+    parser.add_argument("--model", help="Path to a single trained NGAV model bundle")
     parser.add_argument("--threshold", type=float, help="Override threshold from the model bundle")
+    parser.add_argument(
+        "--ngav-only",
+        action="store_true",
+        help="Use only the main NGAV model and skip behavior_model.pkl",
+    )
     parser.add_argument("--anomalies-only", action="store_true", help="Print only anomalous detections")
     args = parser.parse_args()
 
-    detector = NgavDetector(Path(args.model), threshold=args.threshold)
+    detector = NgavDetector(
+        Path(args.model) if args.model else None,
+        threshold=args.threshold,
+        include_behavior_model=not args.ngav_only,
+    )
     detections = detector.detect_events(load_events(Path(args.events_file)))
     for detection in detections:
         if args.anomalies_only and not detection.is_anomaly:
