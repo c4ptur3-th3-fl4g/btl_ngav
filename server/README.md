@@ -11,11 +11,48 @@ uvicorn server.collector:app --host 0.0.0.0 --port 8000
 
 Endpoints:
 - `POST /ingest` — accept JSON with `endpoint`, `event_type`, optional `timestamp` and `data`.
- - `POST /ingest` — accept JSON with `endpoint`, `event_type`, optional `timestamp` and `data`.
-	 Requires an API key. Supply header `X-API-Key: <key>` or `Authorization: ApiKey <key>`.
+  Requires an API key. Supply header `X-API-Key: <key>` or `Authorization: ApiKey <key>`.
 - `GET /events?limit=100` — returns last `limit` events.
+- `GET /detections?limit=100&anomalies_only=true` — returns detection results.
 
 Registration:
 - `POST /register_agent` — register an agent API key. Payload: `{"endpoint":"name","api_key":"optional-agent-generated-key"}`. If `api_key` is omitted, the server returns a generated key.
 
 Logs are stored in `server/logs/events.jsonl`.
+
+EMBER training
+
+Put a local EMBER subset under `data/ember` or another ignored directory. The trainer accepts raw EMBER JSONL files such as `train_features_0.jsonl` or a flattened CSV with a `label` column.
+
+```bash
+.venv/bin/python scripts/train_ember_models.py --ember-path data/ember --limit 50000
+```
+
+For optional GPU training on NVIDIA GPUs such as GTX1650, first make sure `nvidia-smi` works, then install the optional GPU package:
+
+```bash
+.venv/bin/pip install -r requirements-gpu.txt
+.venv/bin/python scripts/train_ember_models.py --ember-path data/ember_extracted/ember2018 --limit 50000 --device cuda
+```
+
+Use `--device auto` to prefer GPU and fall back to CPU when the driver or package is not available.
+
+This writes:
+- `models/ember_ngav.pkl` — supervised benign/malware NGAV classifier.
+- `models/ember_anomaly.pkl` — anomaly detector trained from benign EMBER samples.
+
+The collector loads these models automatically when the files exist. Send PE/static features in either `data.ember_features` or `data.pe_features`:
+
+```json
+{
+  "endpoint": "host-1",
+  "event_type": "pe_static",
+  "data": {
+    "ember_features": {
+      "histogram": [0, 1, 2],
+      "strings": {"numstrings": 10},
+      "general": {"size": 12345}
+    }
+  }
+}
+```

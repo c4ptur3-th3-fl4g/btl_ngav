@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -10,6 +11,8 @@ import pandas as pd
 
 DEFAULT_MODEL_PATH = Path(__file__).resolve().parents[1] / "models" / "ngav.pkl"
 DEFAULT_BEHAVIOR_MODEL_PATH = Path(__file__).resolve().parents[1] / "models" / "behavior_model.pkl"
+DEFAULT_EMBER_NGAV_MODEL_PATH = Path(__file__).resolve().parents[1] / "models" / "ember_ngav.pkl"
+DEFAULT_EMBER_ANOMALY_MODEL_PATH = Path(__file__).resolve().parents[1] / "models" / "ember_anomaly.pkl"
 
 
 @dataclass
@@ -43,6 +46,8 @@ class ModelRunner:
     pipeline: Any
     feature_columns: List[str]
     threshold: float
+    feature_kind: str
+    score_mode: str
 
 
 class NgavDetector:
@@ -51,12 +56,18 @@ class NgavDetector:
         model_path: Optional[Path] = None,
         threshold: Optional[float] = None,
         include_behavior_model: bool = True,
+        include_ember_models: bool = True,
     ) -> None:
         model_paths = [Path(model_path).resolve()] if model_path else [DEFAULT_MODEL_PATH]
         if include_behavior_model and DEFAULT_BEHAVIOR_MODEL_PATH.exists():
             behavior_path = DEFAULT_BEHAVIOR_MODEL_PATH.resolve()
             if behavior_path not in [path.resolve() for path in model_paths]:
                 model_paths.append(behavior_path)
+        if include_ember_models:
+            for ember_path in [DEFAULT_EMBER_NGAV_MODEL_PATH, DEFAULT_EMBER_ANOMALY_MODEL_PATH]:
+                resolved_ember_path = ember_path.resolve()
+                if ember_path.exists() and resolved_ember_path not in [path.resolve() for path in model_paths]:
+                    model_paths.append(resolved_ember_path)
 
         self.models = [_load_model_runner(path, threshold=threshold) for path in model_paths]
         if not self.models:
@@ -69,9 +80,13 @@ class NgavDetector:
 
         detections: List[Detection] = []
         for model in self.models:
-            frame = _build_feature_frame(records, model.feature_columns)
-            scores = -model.pipeline.decision_function(frame)
-            for record, score in zip(records, scores):
+            model_records = [record for record in records if _record_matches_model(record, model.feature_kind)]
+            if not model_records:
+                continue
+
+            model_input = _build_model_input(model_records, model)
+            scores = _score_model(model, model_input)
+            for record, score in zip(model_records, scores):
                 score_value = float(score)
                 detections.append(
                     Detection(
@@ -102,8 +117,10 @@ def _load_model_runner(path: Path, threshold: Optional[float] = None) -> ModelRu
         name=model_name,
         path=resolved_path,
         pipeline=bundle["pipeline"],
-        feature_columns=list(bundle["feature_columns"]),
+        feature_columns=list(bundle.get("feature_columns", [])),
         threshold=float(threshold) if threshold is not None else float(bundle["threshold"]),
+        feature_kind=bundle.get("feature_kind", "process"),
+        score_mode=bundle.get("score_mode", "negative_decision_function"),
     )
 
 
@@ -112,16 +129,23 @@ def _extract_records(event: Dict[str, Any]) -> Iterable[Dict[str, Any]]:
     if not isinstance(data, dict):
         return []
 
+    ember_features = data.get("ember_features") or data.get("pe_features")
+    if isinstance(ember_features, dict):
+        return [_tag_ember_record(ember_features)]
+
     records = data.get("records")
     if isinstance(records, list):
-        return [record for record in records if isinstance(record, dict)]
+        return [_tag_record(record) for record in records if isinstance(record, dict)]
 
     record = data.get("record")
     if isinstance(record, dict):
-        return [record]
+        return [_tag_record(record)]
 
     if _looks_like_process_record(data):
-        return [data]
+        return [_tag_record(data)]
+
+    if _looks_like_ember_record(data):
+        return [_tag_ember_record(data)]
 
     return []
 
@@ -131,12 +155,103 @@ def _looks_like_process_record(data: Dict[str, Any]) -> bool:
     return bool(process_fields.intersection(data.keys()))
 
 
+def _looks_like_ember_record(data: Dict[str, Any]) -> bool:
+    ember_fields = {"histogram", "byteentropy", "strings", "general", "header", "section", "imports", "exports", "datadirectories"}
+    return bool(ember_fields.intersection(data.keys()))
+
+
+def _tag_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    if "_feature_kind" in record:
+        return record
+    if _looks_like_ember_record(record):
+        return _tag_ember_record(record)
+    return {**record, "_feature_kind": "process"}
+
+
+def _tag_ember_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    flattened: Dict[str, Any]
+    if _looks_like_ember_record(record):
+        flattened = dict(_flatten_ember_features(record))
+    else:
+        flattened = dict(record)
+    flattened["_feature_kind"] = "ember"
+    return flattened
+
+
+def _flatten_ember_features(record: Dict[str, Any]) -> Dict[str, float]:
+    features: Dict[str, float] = {}
+    for key, value in record.items():
+        if key in {"label", "sha256", "appeared", "avclass", "_feature_kind"}:
+            continue
+        _flatten_value(key, value, features)
+    return features
+
+
+def _flatten_value(prefix: str, value: Any, out: Dict[str, float]) -> None:
+    number = _to_float(value)
+    if number is not None:
+        out[prefix] = number
+        return
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            _flatten_value(f"{prefix}.{key}", nested, out)
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _flatten_value(f"{prefix}.{index}", item, out)
+
+
+def _to_float(value: Any) -> Optional[float]:
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float)) and math.isfinite(value):
+        return float(value)
+    return None
+
+
+def _record_matches_model(record: Dict[str, Any], feature_kind: str) -> bool:
+    return record.get("_feature_kind", "process") == feature_kind
+
+
+def _build_model_input(records: List[Dict[str, Any]], model: ModelRunner) -> Any:
+    cleaned_records = [{key: value for key, value in record.items() if key != "_feature_kind"} for record in records]
+    if model.feature_kind == "ember":
+        return cleaned_records
+    return _build_feature_frame(cleaned_records, model.feature_columns)
+
+
 def _build_feature_frame(records: List[Dict[str, Any]], feature_columns: List[str]) -> pd.DataFrame:
     frame = pd.DataFrame(records)
     for column in feature_columns:
         if column not in frame.columns:
             frame[column] = None
     return frame[feature_columns]
+
+
+def _score_model(model: ModelRunner, model_input: Any) -> Any:
+    if model.score_mode == "predict_proba":
+        _prefer_cpu_inference_for_cpu_input(model.pipeline)
+        probabilities = model.pipeline.predict_proba(model_input)
+        return [float(row[1]) for row in probabilities]
+    return _normalize_scores(model.pipeline.decision_function(model_input), model.score_mode)
+
+
+def _prefer_cpu_inference_for_cpu_input(pipeline: Any) -> None:
+    # XGBoost models may be trained on cuda:0, while collector inference passes CPU dict/sparse input.
+    # Setting the estimator to CPU avoids XGBoost's mismatched-device fallback warning at runtime.
+    estimator = getattr(pipeline, "named_steps", {}).get("classifier")
+    if estimator is None or not hasattr(estimator, "set_params"):
+        return
+    try:
+        estimator.set_params(device="cpu")
+    except Exception:
+        return
+
+
+def _normalize_scores(raw_scores: Any, score_mode: str) -> Any:
+    if score_mode == "decision_function":
+        return raw_scores
+    return -raw_scores
 
 
 def load_events(path: Path) -> List[Dict[str, Any]]:
@@ -160,6 +275,11 @@ def main() -> None:
         action="store_true",
         help="Use only the main NGAV model and skip behavior_model.pkl",
     )
+    parser.add_argument(
+        "--no-ember",
+        action="store_true",
+        help="Skip EMBER static PE models",
+    )
     parser.add_argument("--anomalies-only", action="store_true", help="Print only anomalous detections")
     args = parser.parse_args()
 
@@ -167,6 +287,7 @@ def main() -> None:
         Path(args.model) if args.model else None,
         threshold=args.threshold,
         include_behavior_model=not args.ngav_only,
+        include_ember_models=not args.no_ember,
     )
     detections = detector.detect_events(load_events(Path(args.events_file)))
     for detection in detections:

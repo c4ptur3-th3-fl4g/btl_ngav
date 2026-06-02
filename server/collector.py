@@ -10,8 +10,10 @@ import secrets
 
 try:
     from .detector import NgavDetector
+    from .alert import handle_detection
 except ImportError:
     from detector import NgavDetector
+    from alert import handle_detection
 
 
 # Logs and keys directory
@@ -94,6 +96,10 @@ def _detect_event(evt: Dict[str, Any]) -> list:
         detections = [det.to_dict() for det in detector.detect_event(evt)]
         for det in detections:
             _append_detection(det)
+            try:
+                handle_detection(det, event=evt)
+            except Exception as ex:
+                print(f"[warn] alert dispatch failed: {ex}")
         return detections
     except Exception as ex:
         print(f"[warn] NGAV detection failed: {ex}")

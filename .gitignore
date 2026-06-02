@@ -4,5 +4,8 @@
 agent/config.yaml
 config/config.yaml
 /models
+/data
+/datasets
 /server/__pycache__
 /server/logs
+/scripts
