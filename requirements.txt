@@ -7,3 +7,5 @@ pyyaml
 matplotlib
 jupyter
 watchdog
+fastapi
+uvicorn

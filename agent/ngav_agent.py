@@ -10,6 +10,8 @@ from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Dict, List, Optional
 import threading
+import secrets
+from urllib import parse as urlparse
 
 from file_monitor import FileEvent, watch_paths
 from network_monitor import NetworkSample, watch_network
@@ -62,6 +64,8 @@ class AgentConfig:
     telegram: TelegramConfig
     discord: DiscordConfig
     network_bandwidth_threshold: Optional[float]
+    collector_url: Optional[str]
+    api_key_path: Optional[Path]
 
 
 def safe(callable_obj, default=None):
@@ -116,6 +120,8 @@ def load_config(config_path: Path) -> AgentConfig:
         telegram=telegram_cfg,
         discord=discord_cfg,
         network_bandwidth_threshold=(lambda v: float(v) if v else None)(raw.get("network", {}).get("bandwidth_threshold_bytes")),
+        collector_url=raw.get("collector", {}).get("url"),
+        api_key_path=(config_path.parent / raw.get("collector", {}).get("api_key_path", "agent/api_key.txt")).resolve(),
     )
     return cfg
 
@@ -521,6 +527,51 @@ def _start_network_watcher(cfg: AgentConfig, interval_seconds: float = 1.0) -> t
     return thread
 
 
+def _generate_api_key() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def _save_api_key(path: Path, key: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        f.write(key)
+
+
+def _load_api_key(path: Path) -> Optional[str]:
+    try:
+        if path.exists():
+            return path.read_text(encoding="utf-8").strip()
+    except Exception:
+        return None
+    return None
+
+
+def _register_with_collector(cfg: AgentConfig) -> Optional[str]:
+    if not cfg.collector_url:
+        return None
+    key_path = cfg.api_key_path
+    key = _load_api_key(key_path)
+    if not key:
+        key = _generate_api_key()
+        _save_api_key(key_path, key)
+
+    # POST to collector /register_agent
+    try:
+        payload = json.dumps({"endpoint": cfg.endpoint_name, "api_key": key}).encode("utf-8")
+        url = urlparse.urljoin(cfg.collector_url, "/register_agent")
+        req = request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+        with request.urlopen(req, timeout=10) as resp:
+            if resp.status >= 400:
+                print(f"[warn] collector registration failed status={resp.status}")
+                return key
+            # success
+            print(f"[info] Registered API key with collector {cfg.collector_url}")
+            return key
+    except Exception as ex:
+        print(f"[warn] failed to register with collector: {ex}")
+        return key
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Basic cross-platform NGAV agent")
     parser.add_argument("--config", required=True, help="Path to YAML config file")
@@ -541,6 +592,11 @@ def main() -> None:
             _start_file_watcher(cfg, paths)
     if getattr(args, "monitor_network", False):
         _start_network_watcher(cfg, interval_seconds=cfg.scan_interval_seconds)
+    # register API key with collector if configured
+    if cfg.collector_url:
+        api_key = _register_with_collector(cfg)
+        if api_key:
+            print(f"[info] API key available at {cfg.api_key_path}")
     if args.realtime:
         run_realtime_loop(cfg, one_shot=args.once)
     else:

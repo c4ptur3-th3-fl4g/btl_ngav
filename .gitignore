@@ -4,3 +4,5 @@
 agent/config.yaml
 config/config.yaml
 /models
+/server/__pycache__
+/server/logs
