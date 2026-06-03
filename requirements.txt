@@ -9,3 +9,4 @@ jupyter
 watchdog
 fastapi
 uvicorn
+elasticsearch

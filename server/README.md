@@ -9,11 +9,30 @@ pip install -r requirements.txt
 uvicorn server.collector:app --host 0.0.0.0 --port 8000
 ```
 
+Elastic web console:
+
+```bash
+docker compose -f docker-compose.elastic.yml up -d
+export ELASTICSEARCH_URL=http://localhost:9200
+uvicorn server.collector:app --host 0.0.0.0 --port 8000
+```
+
+Open:
+- NGAV web console: http://localhost:8000/ui
+- Kibana: http://localhost:5601
+
+The collector writes to these Elasticsearch indices:
+- `ngav-events`
+- `ngav-detections`
+- `ngav-alerts`
+
 Endpoints:
 - `POST /ingest` — accept JSON with `endpoint`, `event_type`, optional `timestamp` and `data`.
   Requires an API key. Supply header `X-API-Key: <key>` or `Authorization: ApiKey <key>`.
 - `GET /events?limit=100` — returns last `limit` events.
 - `GET /detections?limit=100&anomalies_only=true` — returns detection results.
+- `GET /ui` — opens the Elastic-backed management console.
+- `GET /api/elastic/events|detections|alerts` — returns indexed Elastic documents.
 
 Registration:
 - `POST /register_agent` — register an agent API key. Payload: `{"endpoint":"name","api_key":"optional-agent-generated-key"}`. If `api_key` is omitted, the server returns a generated key.

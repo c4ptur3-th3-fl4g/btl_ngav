@@ -11,9 +11,13 @@ import secrets
 try:
     from .detector import NgavDetector
     from .alert import handle_detection
+    from . import elastic_store
+    from .web_ui import router as web_ui_router
 except ImportError:
     from detector import NgavDetector
     from alert import handle_detection
+    import elastic_store
+    from web_ui import router as web_ui_router
 
 
 # Logs and keys directory
@@ -64,6 +68,7 @@ class AgentEvent(BaseModel):
 
 
 app = FastAPI(title="NGAV Collector")
+app.include_router(web_ui_router)
 
 
 def _append_event(evt: Dict[str, Any]) -> None:
@@ -74,6 +79,7 @@ def _append_event(evt: Dict[str, Any]) -> None:
 def _append_detection(det: Dict[str, Any]) -> None:
     with DETECTIONS_FILE.open("a", encoding="utf-8") as f:
         f.write(json.dumps(det, ensure_ascii=False) + "\n")
+    elastic_store.index_detection(det)
 
 
 def _get_detector() -> Optional[NgavDetector]:
@@ -130,6 +136,7 @@ async def ingest(event: AgentEvent, request: Request):
     obj["detections"] = _detect_event(obj)
     try:
         _append_event(obj)
+        elastic_store.index_event(obj)
     except Exception as ex:
         raise HTTPException(status_code=500, detail=str(ex))
     return JSONResponse({"status": "ok", "id": obj["id"], "detections": obj["detections"]})

@@ -10,6 +10,11 @@ from urllib import error, parse, request
 
 import yaml
 
+try:
+    from . import elastic_store
+except ImportError:
+    import elastic_store
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "config.yaml"
@@ -133,6 +138,7 @@ def log_alert(alert: Dict[str, Any]) -> None:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     with ALERTS_FILE.open("a", encoding="utf-8") as f:
         f.write(json.dumps(alert, ensure_ascii=False) + "\n")
+    elastic_store.index_alert(alert)
 
 
 def send_email_alert(email_cfg: EmailConfig, alert: Dict[str, Any]) -> None:
