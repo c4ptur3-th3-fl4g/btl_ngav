@@ -1,0 +1,7 @@
+psutil
+numpy
+pandas
+scikit-learn
+joblib
+pyyaml
+watchdog
