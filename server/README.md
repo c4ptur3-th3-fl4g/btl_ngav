@@ -2,6 +2,8 @@ NGAV Collector
 
 This simple collector receives JSON events from agents and stores them as JSONL.
 
+For full server and endpoint installation steps, see `INSTALL.md` at the project root.
+
 Architecture:
 - Endpoints install only the lightweight agent in background/service mode.
 - Models stay on the server.
@@ -13,6 +15,36 @@ Run locally:
 ```bash
 pip install -r requirements.txt
 uvicorn server.collector:app --host 0.0.0.0 --port 8000
+```
+
+One-click server install:
+
+```bash
+sudo scripts/install_server.sh --server-ip <SERVER_IP>
+```
+
+The installer:
+- copies the server to `/opt/ngav-server`
+- creates a Python virtualenv
+- installs dependencies
+- starts Elasticsearch/Kibana with Docker Compose when Docker is available
+- creates and starts the `ngav-collector` systemd service
+- enables startup on boot
+- listens for agents on `0.0.0.0:8000`
+- generates an endpoint bundle at `/opt/ngav-server/dist/ngav-agent.zip`
+
+Useful server commands:
+
+```bash
+sudo systemctl status ngav-collector
+sudo journalctl -u ngav-collector -f
+curl http://<SERVER_IP>:8000/agents
+```
+
+Uninstall:
+
+```bash
+sudo scripts/uninstall_server.sh --stop-elastic
 ```
 
 Elastic web console:
@@ -39,6 +71,7 @@ Endpoints:
 - `GET /detections?limit=100&anomalies_only=true` — returns detection results.
 - `GET /ui` — opens the Elastic-backed management console.
 - `GET /api/elastic/events|detections|alerts` — returns indexed Elastic documents.
+- `GET /agents` — lists registered agents and their last seen IP address.
 
 Registration:
 - `POST /register_agent` — register an agent API key. Payload: `{"endpoint":"name","api_key":"optional-agent-generated-key"}`. If `api_key` is omitted, the server returns a generated key.

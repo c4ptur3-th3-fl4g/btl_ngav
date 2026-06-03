@@ -8,4 +8,3 @@ config/config.yaml
 /datasets
 /server/__pycache__
 /server/logs
-/scripts

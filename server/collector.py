@@ -58,6 +58,17 @@ def _append_key(rec: Dict[str, Any]) -> None:
 _load_keys()
 
 
+def _touch_agent(api_key: str, endpoint: str, remote_addr: Optional[str], event_type: Optional[str] = None) -> None:
+    rec = _KEYS.get(api_key)
+    if not rec:
+        return
+    rec["endpoint"] = endpoint or rec.get("endpoint")
+    rec["last_seen_ts"] = time.time()
+    rec["last_remote_addr"] = remote_addr
+    if event_type:
+        rec["last_event_type"] = event_type
+
+
 
 
 class AgentEvent(BaseModel):
@@ -133,6 +144,7 @@ async def ingest(event: AgentEvent, request: Request):
     obj["id"] = str(uuid.uuid4())
     obj["remote_addr"] = request.client.host if request.client else None
     obj["api_key"] = api_key
+    _touch_agent(api_key, obj["endpoint"], obj["remote_addr"], obj["event_type"])
     obj["detections"] = _detect_event(obj)
     try:
         _append_event(obj)
@@ -149,17 +161,22 @@ class AgentRegistration(BaseModel):
 
 
 @app.post("/register_agent")
-def register_agent(reg: AgentRegistration):
+def register_agent(reg: AgentRegistration, request: Request):
     # agent may provide its own api_key; otherwise server will generate one
     key = reg.api_key or secrets.token_urlsafe(32)
+    remote_addr = request.client.host if request.client else None
     if key in _KEYS:
         # already registered
+        _touch_agent(key, reg.endpoint, remote_addr, "register")
         return {"status": "exists", "api_key": key}
 
     rec = {
         "api_key": key,
         "endpoint": reg.endpoint,
         "created_ts": time.time(),
+        "last_seen_ts": time.time(),
+        "last_remote_addr": remote_addr,
+        "last_event_type": "register",
     }
     try:
         _append_key(rec)
@@ -167,6 +184,24 @@ def register_agent(reg: AgentRegistration):
         raise HTTPException(status_code=500, detail=str(ex))
 
     return {"status": "ok", "api_key": key}
+
+
+@app.get("/agents")
+def list_agents():
+    agents = []
+    for rec in _KEYS.values():
+        agents.append(
+            {
+                "endpoint": rec.get("endpoint"),
+                "created_ts": rec.get("created_ts"),
+                "last_seen_ts": rec.get("last_seen_ts"),
+                "last_remote_addr": rec.get("last_remote_addr"),
+                "last_event_type": rec.get("last_event_type"),
+                "api_key": "[redacted]",
+            }
+        )
+    agents.sort(key=lambda item: item.get("last_seen_ts") or 0, reverse=True)
+    return {"agents": agents}
 
 
 @app.get("/events")

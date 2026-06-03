@@ -2,6 +2,8 @@
 
 Collector URL: `http://localhost:8000`
 
+This is a sensor-only agent. Models stay on the NGAV server.
+
 ## Linux
 
 ```bash
@@ -15,6 +17,7 @@ Install as a systemd service:
 ```bash
 sudo ./install_linux.sh --systemd
 sudo systemctl status ngav-agent
+sudo journalctl -u ngav-agent -f
 ```
 
 ## Windows PowerShell
@@ -31,6 +34,7 @@ Install as a background startup task. Run PowerShell as Administrator:
 Set-ExecutionPolicy -Scope Process Bypass
 .\install_windows.ps1 -Task
 Get-ScheduledTask -TaskName "NGAV Agent"
+Get-ScheduledTaskInfo -TaskName "NGAV Agent"
 ```
 
 Add file watch paths to the startup task:
