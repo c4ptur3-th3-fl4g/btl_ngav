@@ -1,0 +1,3 @@
+# Optional GPU training dependency for EMBER supervised NGAV.
+# Requires a working NVIDIA driver (`nvidia-smi`) and a CUDA-capable GPU.
+xgboost>=2.0
