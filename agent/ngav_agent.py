@@ -17,10 +17,8 @@ from file_monitor import FileEvent, watch_paths
 from network_monitor import NetworkSample, watch_network
 from urllib import error, parse, request
 
-import joblib
 import psutil
 import yaml
-import pandas as pd
 import os
 
 from process_monitor import ProcessEvent, ProcessSnapshot, diff_process_state, scan_processes
@@ -73,6 +71,22 @@ def safe(callable_obj, default=None):
         return callable_obj()
     except Exception:
         return default
+
+
+def _require_joblib():
+    try:
+        import joblib
+    except ImportError as ex:
+        raise RuntimeError("Local detection requires joblib. Install the full server requirements or use collector mode.") from ex
+    return joblib
+
+
+def _require_pandas():
+    try:
+        import pandas as pd
+    except ImportError as ex:
+        raise RuntimeError("Local detection requires pandas. Install the full server requirements or use collector mode.") from ex
+    return pd
 
 
 def load_config(config_path: Path) -> AgentConfig:
@@ -199,7 +213,7 @@ def snapshot_to_record(snapshot: ProcessSnapshot) -> Dict:
     }
 
 
-def collect_snapshot(cfg: AgentConfig) -> pd.DataFrame:
+def collect_process_records(cfg: AgentConfig) -> List[Dict]:
     rows: List[Dict] = []
     include_patterns = cfg.include_process_name_patterns
     exclude_names = set(cfg.exclude_process_names)
@@ -218,6 +232,12 @@ def collect_snapshot(cfg: AgentConfig) -> pd.DataFrame:
 
         rows.append(record)
 
+    return rows
+
+
+def collect_snapshot(cfg: AgentConfig):
+    pd = _require_pandas()
+    rows = collect_process_records(cfg)
     if not rows:
         return pd.DataFrame()
 
@@ -302,7 +322,48 @@ def dispatch_alert(cfg: AgentConfig, subject: str, body: str) -> None:
     send_discord_alert(cfg.discord, subject, body)
 
 
-def build_feature_frame_from_records(records: List[Dict], feature_columns: List[str]) -> pd.DataFrame:
+def send_collector_event(
+    cfg: AgentConfig,
+    api_key: str,
+    event_type: str,
+    data: Dict,
+    timestamp: Optional[float] = None,
+) -> bool:
+    if not cfg.collector_url:
+        return False
+
+    payload = json.dumps(
+        {
+            "endpoint": cfg.endpoint_name,
+            "event_type": event_type,
+            "timestamp": timestamp or time.time(),
+            "data": data,
+        }
+    ).encode("utf-8")
+    url = urlparse.urljoin(cfg.collector_url, "/ingest")
+    req = request.Request(
+        url,
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "X-API-Key": api_key,
+        },
+        method="POST",
+    )
+
+    try:
+        with request.urlopen(req, timeout=20) as response:
+            if response.status >= 400:
+                print(f"[warn] collector ingest failed status={response.status}")
+                return False
+        return True
+    except Exception as ex:
+        print(f"[warn] collector ingest error: {ex}")
+        return False
+
+
+def build_feature_frame_from_records(records: List[Dict], feature_columns: List[str]):
+    pd = _require_pandas()
     df = pd.DataFrame(records)
     if df.empty:
         return df
@@ -357,7 +418,7 @@ def score_record(
     return score
 
 
-def format_alert(endpoint_name: str, row: pd.Series, score: float, threshold: float) -> str:
+def format_alert(endpoint_name: str, row, score: float, threshold: float) -> str:
     ts = datetime.now(timezone.utc).isoformat()
     lines = [
         f"Time (UTC): {ts}",
@@ -381,6 +442,7 @@ def format_alert(endpoint_name: str, row: pd.Series, score: float, threshold: fl
 
 
 def run_loop(cfg: AgentConfig, one_shot: bool = False) -> None:
+    joblib = _require_joblib()
     bundle = joblib.load(cfg.model_path)
     pipeline = bundle["pipeline"]
     feature_columns = bundle["feature_columns"]
@@ -431,6 +493,7 @@ def run_loop(cfg: AgentConfig, one_shot: bool = False) -> None:
 
 
 def run_realtime_loop(cfg: AgentConfig, one_shot: bool = False) -> None:
+    joblib = _require_joblib()
     bundle = joblib.load(cfg.model_path)
     pipeline = bundle["pipeline"]
     feature_columns = bundle["feature_columns"]
@@ -469,10 +532,82 @@ def run_realtime_loop(cfg: AgentConfig, one_shot: bool = False) -> None:
         current = next_state
 
 
-def _start_file_watcher(cfg: AgentConfig, paths: List[str], interval_seconds: float = 1.0) -> threading.Thread:
+def run_collector_loop(cfg: AgentConfig, api_key: str, one_shot: bool = False) -> None:
+    print(f"[info] Running in collector mode on endpoint: {cfg.endpoint_name}")
+    while True:
+        records = collect_process_records(cfg)
+        ok = send_collector_event(
+            cfg,
+            api_key,
+            "process_snapshot",
+            {
+                "records": records,
+                "count": len(records),
+                "platform": platform.system().lower(),
+            },
+        )
+        print(f"[info] {datetime.now().isoformat()} sent process_snapshot count={len(records)} ok={ok}")
+        if one_shot:
+            return
+        time.sleep(cfg.scan_interval_seconds)
+
+
+def run_collector_realtime_loop(cfg: AgentConfig, api_key: str, one_shot: bool = False) -> None:
+    print(f"[info] Running in collector realtime mode on endpoint: {cfg.endpoint_name}")
+    current = scan_processes()
+
+    initial_records = [snapshot_to_record(snapshot) for snapshot in current.values()]
+    send_collector_event(
+        cfg,
+        api_key,
+        "process_snapshot",
+        {
+            "records": initial_records,
+            "count": len(initial_records),
+            "platform": platform.system().lower(),
+        },
+    )
+    if one_shot:
+        return
+
+    while True:
+        time.sleep(cfg.scan_interval_seconds)
+        next_state = scan_processes()
+        events = diff_process_state(current, next_state)
+        for event in events:
+            if event.event_type not in {"started", "updated"}:
+                continue
+            record = snapshot_to_record(event.snapshot)
+            send_collector_event(
+                cfg,
+                api_key,
+                f"process_{event.event_type}",
+                {
+                    "record": record,
+                    "process_event_type": event.event_type,
+                    "platform": platform.system().lower(),
+                },
+            )
+            print(
+                f"[info] {datetime.now().isoformat()} sent process_{event.event_type} "
+                f"pid={record.get('pid')} name={record.get('name')}"
+            )
+        current = next_state
+
+
+def _start_file_watcher(
+    cfg: AgentConfig,
+    paths: List[str],
+    interval_seconds: float = 1.0,
+    api_key: Optional[str] = None,
+) -> threading.Thread:
     def _on_event(ev: FileEvent) -> None:
         try:
             ts = datetime.now(timezone.utc).isoformat()
+            data = {
+                "path": ev.path,
+                "file_event_type": ev.event_type,
+            }
             subject = f"[NGAV] File {ev.event_type} on {cfg.endpoint_name}: {ev.path}"
             body_lines = [
                 f"Time (UTC): {ts}",
@@ -482,13 +617,18 @@ def _start_file_watcher(cfg: AgentConfig, paths: List[str], interval_seconds: fl
             ]
             try:
                 st = os.stat(ev.path)
+                data["size"] = st.st_size
+                data["mtime"] = st.st_mtime
                 body_lines.append(f"Size: {st.st_size}")
                 body_lines.append(f"MTime: {st.st_mtime}")
             except Exception:
                 pass
 
-            body = "\n".join(body_lines)
-            dispatch_alert(cfg, subject, body)
+            if api_key:
+                send_collector_event(cfg, api_key, "file_event", data)
+            else:
+                body = "\n".join(body_lines)
+                dispatch_alert(cfg, subject, body)
         except Exception:
             pass
 
@@ -497,7 +637,11 @@ def _start_file_watcher(cfg: AgentConfig, paths: List[str], interval_seconds: fl
     return thread
 
 
-def _start_network_watcher(cfg: AgentConfig, interval_seconds: float = 1.0) -> threading.Thread:
+def _start_network_watcher(
+    cfg: AgentConfig,
+    interval_seconds: float = 1.0,
+    api_key: Optional[str] = None,
+) -> threading.Thread:
     def _on_sample(sample: NetworkSample) -> None:
         try:
             # sample.interfaces: iface -> metrics
@@ -510,15 +654,24 @@ def _start_network_watcher(cfg: AgentConfig, interval_seconds: float = 1.0) -> t
                 if thr is not None and max(sent, recv) < thr:
                     continue
 
-                subject = f"[NGAV] Network spike on {cfg.endpoint_name}: {iface}"
-                body = (
-                    f"Time (UTC): {ts}\n"
-                    f"Endpoint: {cfg.endpoint_name}\n"
-                    f"Interface: {iface}\n"
-                    f"bytes_sent_per_sec: {sent:.2f}\n"
-                    f"bytes_recv_per_sec: {recv:.2f}\n"
-                )
-                dispatch_alert(cfg, subject, body)
+                data = {
+                    "interface": iface,
+                    "bytes_sent_per_sec": sent,
+                    "bytes_recv_per_sec": recv,
+                    "sample_ts": ts,
+                }
+                if api_key:
+                    send_collector_event(cfg, api_key, "network_sample", data)
+                else:
+                    subject = f"[NGAV] Network spike on {cfg.endpoint_name}: {iface}"
+                    body = (
+                        f"Time (UTC): {ts}\n"
+                        f"Endpoint: {cfg.endpoint_name}\n"
+                        f"Interface: {iface}\n"
+                        f"bytes_sent_per_sec: {sent:.2f}\n"
+                        f"bytes_recv_per_sec: {recv:.2f}\n"
+                    )
+                    dispatch_alert(cfg, subject, body)
         except Exception:
             pass
 
@@ -585,22 +738,31 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     cfg = load_config(Path(args.config).resolve())
-    # start file watcher if requested
-    if getattr(args, "watch_paths", None):
-        paths = [p.strip() for p in args.watch_paths.split(",") if p.strip()]
-        if paths:
-            _start_file_watcher(cfg, paths)
-    if getattr(args, "monitor_network", False):
-        _start_network_watcher(cfg, interval_seconds=cfg.scan_interval_seconds)
-    # register API key with collector if configured
+
+    api_key = None
     if cfg.collector_url:
         api_key = _register_with_collector(cfg)
         if api_key:
             print(f"[info] API key available at {cfg.api_key_path}")
-    if args.realtime:
-        run_realtime_loop(cfg, one_shot=args.once)
+
+    if getattr(args, "watch_paths", None):
+        paths = [p.strip() for p in args.watch_paths.split(",") if p.strip()]
+        if paths:
+            _start_file_watcher(cfg, paths, api_key=api_key)
+    if getattr(args, "monitor_network", False):
+        _start_network_watcher(cfg, interval_seconds=cfg.scan_interval_seconds, api_key=api_key)
+
+    if cfg.collector_url and api_key:
+        if args.realtime:
+            run_collector_realtime_loop(cfg, api_key, one_shot=args.once)
+        else:
+            run_collector_loop(cfg, api_key, one_shot=args.once)
     else:
-        run_loop(cfg, one_shot=args.once)
+        print("[warn] collector.url is not configured; falling back to local detection mode")
+        if args.realtime:
+            run_realtime_loop(cfg, one_shot=args.once)
+        else:
+            run_loop(cfg, one_shot=args.once)
 
 
 if __name__ == "__main__":

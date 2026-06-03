@@ -1,7 +1,5 @@
 scan_interval_seconds: 20
 cooldown_seconds: 600
-score_threshold: null
-model_path: ../models/ngav.pkl
 email:
   enabled: false
   smtp_server: smtp.gmail.com

@@ -18,7 +18,7 @@ if [[ "${1:-}" == "--systemd" ]]; then
   fi
   INSTALL_DIR="${INSTALL_DIR:-/opt/ngav-agent}"
   mkdir -p "$INSTALL_DIR"
-  rsync -a --delete "$ROOT/" "$INSTALL_DIR/"
+  cp -a "$ROOT/." "$INSTALL_DIR/"
   cat >/etc/systemd/system/ngav-agent.service <<SERVICE
 [Unit]
 Description=NGAV Agent

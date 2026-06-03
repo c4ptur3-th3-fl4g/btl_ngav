@@ -2,6 +2,12 @@ NGAV Collector
 
 This simple collector receives JSON events from agents and stores them as JSONL.
 
+Architecture:
+- Endpoints install only the lightweight agent in background/service mode.
+- Models stay on the server.
+- Agents send process, file, and network telemetry to `POST /ingest`.
+- The server collector runs detection, alerting, and Elastic indexing.
+
 Run locally:
 
 ```bash

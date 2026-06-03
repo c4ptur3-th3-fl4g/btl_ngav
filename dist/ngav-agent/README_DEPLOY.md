@@ -25,6 +25,26 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\run_agent.ps1
 ```
 
+Install as a background startup task. Run PowerShell as Administrator:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\install_windows.ps1 -Task
+Get-ScheduledTask -TaskName "NGAV Agent"
+```
+
+Add file watch paths to the startup task:
+
+```powershell
+.\install_windows.ps1 -Task -WatchPaths "C:\Users,C:\Windows\Temp"
+```
+
+Uninstall the startup task and installed files:
+
+```powershell
+.\uninstall_windows.ps1
+```
+
 ## Watch paths
 
 Add paths at runtime:
@@ -36,5 +56,7 @@ Add paths at runtime:
 ```powershell
 .\run_agent.ps1 --watch-paths C:\Users,C:\Windows\Temp
 ```
+
+This bundle is sensor-only. Models stay on the NGAV server; this agent only sends telemetry to the collector.
 
 The agent stores its API key at `agent/api_key.txt` after first registration.
