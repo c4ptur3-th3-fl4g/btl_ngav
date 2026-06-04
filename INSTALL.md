@@ -84,6 +84,12 @@ Uninstall server:
 sudo scripts/uninstall_server.sh --stop-elastic
 ```
 
+Cleanly remove the server and all native ELK files/services/cache:
+
+```bash
+sudo scripts/uninstall_server.sh --purge-elk
+```
+
 ## 2. Agent Bundle
 
 After server install, copy this file from the server to each endpoint:

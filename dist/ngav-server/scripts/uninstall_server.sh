@@ -4,17 +4,28 @@ set -euo pipefail
 INSTALL_DIR="/opt/ngav-server"
 ELASTIC_DIR="/opt/ngav-elastic"
 SERVICE_NAME="ngav-collector"
-STOP_ELASTIC="0"
-STOP_NATIVE_ELASTIC="0"
+PURGE_ELK="0"
+REMOVE_ELASTIC_USER="1"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --install-dir) INSTALL_DIR="$2"; shift 2 ;;
     --elastic-dir) ELASTIC_DIR="$2"; shift 2 ;;
-    --stop-elastic) STOP_ELASTIC="1"; STOP_NATIVE_ELASTIC="1"; shift ;;
-    --stop-native-elastic) STOP_NATIVE_ELASTIC="1"; shift ;;
+    --stop-elastic|--stop-native-elastic|--purge-elastic|--purge-elk) PURGE_ELK="1"; shift ;;
+    --keep-elastic-user) REMOVE_ELASTIC_USER="0"; shift ;;
     -h|--help)
-      echo "Usage: sudo $0 [--install-dir /opt/ngav-server] [--stop-elastic] [--stop-native-elastic]"
+      cat <<USAGE
+Usage: sudo $0 [options]
+
+Options:
+  --install-dir PATH       Server install directory. Default: /opt/ngav-server
+  --elastic-dir PATH       Native ELK directory. Default: /opt/ngav-elastic
+  --purge-elk              Remove native Elasticsearch/Kibana completely
+  --purge-elastic          Alias for --purge-elk
+  --stop-elastic           Alias for --purge-elk
+  --stop-native-elastic    Alias for --purge-elk
+  --keep-elastic-user      Do not remove the elasticsearch system user/group
+USAGE
       exit 0
       ;;
     *) echo "[error] unknown option: $1"; exit 1 ;;
@@ -33,14 +44,38 @@ if systemctl list-unit-files | grep -q "^${SERVICE_NAME}.service"; then
   echo "[ok] removed systemd service: $SERVICE_NAME"
 fi
 
-if [[ "$STOP_NATIVE_ELASTIC" == "1" ]]; then
-  systemctl disable --now ngav-kibana ngav-elasticsearch || true
-  rm -f /etc/systemd/system/ngav-kibana.service /etc/systemd/system/ngav-elasticsearch.service
+if [[ "$PURGE_ELK" == "1" ]]; then
+  systemctl disable --now ngav-kibana ngav-elasticsearch kibana elasticsearch || true
+  rm -f \
+    /etc/systemd/system/ngav-kibana.service \
+    /etc/systemd/system/ngav-elasticsearch.service \
+    /etc/systemd/system/kibana.service \
+    /etc/systemd/system/elasticsearch.service
   systemctl daemon-reload
+
   if [[ -d "$ELASTIC_DIR" ]]; then
     rm -rf "$ELASTIC_DIR"
   fi
-  echo "[ok] removed native Elasticsearch/Kibana services and files"
+
+  rm -rf /tmp/ngav-elastic-install
+  rm -rf /var/lib/elasticsearch /var/log/elasticsearch /etc/elasticsearch
+  rm -rf /var/lib/kibana /var/log/kibana /etc/kibana
+  rm -f /etc/apt/sources.list.d/elastic-8.x.list /usr/share/keyrings/elasticsearch-keyring.gpg
+
+  if command -v pacman >/dev/null 2>&1; then
+    pacman -Rns --noconfirm elasticsearch kibana >/dev/null 2>&1 || true
+  fi
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get purge -y elasticsearch kibana >/dev/null 2>&1 || true
+    apt-get autoremove -y >/dev/null 2>&1 || true
+  fi
+
+  if [[ "$REMOVE_ELASTIC_USER" == "1" ]]; then
+    userdel elasticsearch >/dev/null 2>&1 || true
+    groupdel elasticsearch >/dev/null 2>&1 || true
+  fi
+
+  echo "[ok] purged Elasticsearch/Kibana services, files, cache, and package traces"
 fi
 
 rm -f /etc/ngav-server.env
