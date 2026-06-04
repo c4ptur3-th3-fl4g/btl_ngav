@@ -71,6 +71,34 @@ ensure_elastic_user() {
   fi
 }
 
+download_archive() {
+  local url="$1"
+  local path="$2"
+  local tmp_path="${path}.part"
+
+  if [[ -f "$path" ]]; then
+    if tar -tzf "$path" >/dev/null 2>&1; then
+      echo "[info] using cached archive: $path"
+      return 0
+    fi
+    echo "[warn] cached archive is corrupt, downloading again: $path"
+    rm -f "$path"
+  fi
+
+  rm -f "$tmp_path"
+  echo "[info] downloading $url"
+  curl --fail --location --retry 5 --retry-delay 3 --continue-at - "$url" -o "$tmp_path"
+
+  if ! tar -tzf "$tmp_path" >/dev/null 2>&1; then
+    rm -f "$tmp_path"
+    echo "[error] downloaded archive is incomplete or invalid: $url"
+    echo "[hint] check network/proxy/disk space, then rerun the installer"
+    exit 1
+  fi
+
+  mv "$tmp_path" "$path"
+}
+
 install_elastic_native() {
   local arch
   arch="$(uname -m)"
@@ -94,12 +122,8 @@ install_elastic_native() {
   echo "[info] installing native Elasticsearch/Kibana ${ELASTIC_VERSION} to $ELASTIC_DIR"
   mkdir -p "$cache_dir" "$ELASTIC_DIR"
 
-  if [[ ! -f "$es_tar" ]]; then
-    curl -fL "$es_url" -o "$es_tar"
-  fi
-  if [[ ! -f "$kibana_tar" ]]; then
-    curl -fL "$kibana_url" -o "$kibana_tar"
-  fi
+  download_archive "$es_url" "$es_tar"
+  download_archive "$kibana_url" "$kibana_tar"
 
   rm -rf "$ELASTIC_DIR/elasticsearch" "$ELASTIC_DIR/kibana"
   tar -xzf "$es_tar" -C "$ELASTIC_DIR"
