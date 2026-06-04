@@ -147,7 +147,7 @@ ESCONF
   cat >"$ELASTIC_DIR/kibana/config/kibana.yml" <<KIBCONF
 server.host: "0.0.0.0"
 server.port: 5601
-elasticsearch.hosts: ["http://localhost:9200"]
+elasticsearch.hosts: ["http://127.0.0.1:9200"]
 path.data: "$ELASTIC_DIR/kibana-data"
 KIBCONF
 
@@ -199,9 +199,9 @@ SERVICE
 
   systemctl daemon-reload
   systemctl enable --now ngav-elasticsearch
-  echo "[info] waiting for native Elasticsearch at http://localhost:9200"
+  echo "[info] waiting for native Elasticsearch at http://127.0.0.1:9200"
   for _ in $(seq 1 60); do
-    if curl -fsS http://localhost:9200 >/dev/null 2>&1; then
+    if curl -fsS http://127.0.0.1:9200 >/dev/null 2>&1; then
       echo "[ok] native Elasticsearch is ready"
       systemctl enable --now ngav-kibana
       return 0
@@ -238,7 +238,7 @@ cd "$INSTALL_DIR"
 ".venv/bin/pip" install --upgrade pip
 ".venv/bin/pip" install -r requirements.txt
 
-ELASTIC_URL="http://localhost:9200"
+ELASTIC_URL="http://127.0.0.1:9200"
 if [[ "$NO_ELASTIC" != "1" ]]; then
   install_elastic_native
 fi

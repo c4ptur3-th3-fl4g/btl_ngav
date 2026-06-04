@@ -8,3 +8,4 @@ config/config.yaml
 /datasets
 /server/__pycache__
 /server/logs
+dist/ngav-server/config/config.yaml

@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 EVENTS_INDEX = os.getenv("NGAV_ELASTIC_EVENTS_INDEX", "ngav-events")
 DETECTIONS_INDEX = os.getenv("NGAV_ELASTIC_DETECTIONS_INDEX", "ngav-detections")
 ALERTS_INDEX = os.getenv("NGAV_ELASTIC_ALERTS_INDEX", "ngav-alerts")
-ELASTIC_URL = os.getenv("ELASTICSEARCH_URL", "http://localhost:9200")
+ELASTIC_URL = os.getenv("ELASTICSEARCH_URL", "http://127.0.0.1:9200")
 ELASTIC_API_KEY = os.getenv("ELASTICSEARCH_API_KEY")
 ELASTIC_USERNAME = os.getenv("ELASTICSEARCH_USERNAME")
 ELASTIC_PASSWORD = os.getenv("ELASTICSEARCH_PASSWORD")
