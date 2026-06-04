@@ -13,10 +13,11 @@ ELASTIC_PASSWORD = os.getenv("ELASTICSEARCH_PASSWORD")
 
 _CLIENT: Optional[Any] = None
 _CLIENT_ERROR: Optional[str] = None
+_ACTIVE_ELASTIC_URL: str = ELASTIC_URL
 
 
 def get_client() -> Optional[Any]:
-    global _CLIENT, _CLIENT_ERROR
+    global _CLIENT, _CLIENT_ERROR, _ACTIVE_ELASTIC_URL
     if _CLIENT is not None:
         return _CLIENT
     try:
@@ -31,17 +32,22 @@ def get_client() -> Optional[Any]:
     elif ELASTIC_USERNAME:
         kwargs["basic_auth"] = (ELASTIC_USERNAME, ELASTIC_PASSWORD or "")
 
-    try:
-        client = Elasticsearch(ELASTIC_URL, **kwargs)
-        if not client.ping():
-            _CLIENT_ERROR = f"cannot connect to Elasticsearch at {ELASTIC_URL}"
-            return None
-        _CLIENT = client
-        _ensure_indices(client)
-        return _CLIENT
-    except Exception as ex:
-        _CLIENT_ERROR = str(ex)
-        return None
+    errors: List[str] = []
+    for url in _candidate_urls():
+        try:
+            client = Elasticsearch(url, **kwargs)
+            if not client.ping():
+                errors.append(f"cannot connect to Elasticsearch at {url}")
+                continue
+            _CLIENT = client
+            _ACTIVE_ELASTIC_URL = url
+            _ensure_indices(client)
+            return _CLIENT
+        except Exception as ex:
+            errors.append(f"{url}: {ex}")
+
+    _CLIENT_ERROR = "; ".join(errors) if errors else f"cannot connect to Elasticsearch at {ELASTIC_URL}"
+    return None
 
 
 def health() -> Dict[str, Any]:
@@ -52,7 +58,7 @@ def health() -> Dict[str, Any]:
         info = client.info()
         return {
             "enabled": True,
-            "url": ELASTIC_URL,
+            "url": _ACTIVE_ELASTIC_URL,
             "cluster_name": info.get("cluster_name"),
             "version": (info.get("version") or {}).get("number"),
         }
@@ -139,6 +145,15 @@ def _ensure_indices(client: Any) -> None:
                 client.indices.create(index=index, mappings={"properties": {"@timestamp": {"type": "date"}}})
         except Exception as ex:
             print(f"[warn] failed to ensure Elasticsearch index {index}: {ex}")
+
+
+def _candidate_urls() -> List[str]:
+    urls = [ELASTIC_URL]
+    if "localhost" in ELASTIC_URL:
+        urls.append(ELASTIC_URL.replace("localhost", "127.0.0.1"))
+    elif "127.0.0.1" in ELASTIC_URL:
+        urls.append(ELASTIC_URL.replace("127.0.0.1", "localhost"))
+    return list(dict.fromkeys(urls))
 
 
 def _redact_event(event: Dict[str, Any]) -> Dict[str, Any]:
