@@ -13,7 +13,7 @@ This project uses a server-centered architecture.
 - Linux server
 - Python 3
 - `sudo`
-- Docker + Docker Compose plugin, optional but recommended for Elasticsearch/Kibana
+- `curl` and `tar`
 - Network access from endpoint machines to server port `8000`
 
 ### One-Click Install
@@ -30,12 +30,22 @@ Example:
 sudo scripts/install_server.sh --server-ip 192.168.1.10
 ```
 
+Elasticsearch and Kibana are installed natively by default. Docker is not used.
+
+The native installer downloads Elastic Linux tarballs directly from Elastic, so it works on Arch Linux, Ubuntu, Debian, and other x86_64 Linux distributions with systemd. It does not use Docker, APT packages, Pacman packages, or AUR packages. It installs Elastic into:
+
+```text
+/opt/ngav-elastic
+```
+
+It configures Elasticsearch as single-node on `127.0.0.1:9200` and Kibana on `0.0.0.0:5601`.
+
 The installer will:
 
 - copy the server to `/opt/ngav-server`
 - create `/opt/ngav-server/.venv`
 - install `requirements.txt`
-- start Elasticsearch and Kibana if Docker Compose is available
+- install and start native Elasticsearch/Kibana
 - create the `ngav-collector` systemd service
 - enable the service at boot
 - listen for agents on `0.0.0.0:8000`
@@ -56,6 +66,8 @@ Agents API:    http://<SERVER_IP>:8000/agents
 
 ```bash
 sudo systemctl status ngav-collector
+sudo systemctl status ngav-elasticsearch
+sudo systemctl status ngav-kibana
 sudo systemctl restart ngav-collector
 sudo journalctl -u ngav-collector -f
 ```

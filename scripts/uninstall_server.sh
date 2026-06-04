@@ -2,15 +2,19 @@
 set -euo pipefail
 
 INSTALL_DIR="/opt/ngav-server"
+ELASTIC_DIR="/opt/ngav-elastic"
 SERVICE_NAME="ngav-collector"
 STOP_ELASTIC="0"
+STOP_NATIVE_ELASTIC="0"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --install-dir) INSTALL_DIR="$2"; shift 2 ;;
-    --stop-elastic) STOP_ELASTIC="1"; shift ;;
+    --elastic-dir) ELASTIC_DIR="$2"; shift 2 ;;
+    --stop-elastic) STOP_ELASTIC="1"; STOP_NATIVE_ELASTIC="1"; shift ;;
+    --stop-native-elastic) STOP_NATIVE_ELASTIC="1"; shift ;;
     -h|--help)
-      echo "Usage: sudo $0 [--install-dir /opt/ngav-server] [--stop-elastic]"
+      echo "Usage: sudo $0 [--install-dir /opt/ngav-server] [--stop-elastic] [--stop-native-elastic]"
       exit 0
       ;;
     *) echo "[error] unknown option: $1"; exit 1 ;;
@@ -29,11 +33,14 @@ if systemctl list-unit-files | grep -q "^${SERVICE_NAME}.service"; then
   echo "[ok] removed systemd service: $SERVICE_NAME"
 fi
 
-if [[ "$STOP_ELASTIC" == "1" && -f "$INSTALL_DIR/docker-compose.elastic.yml" ]]; then
-  if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-    docker compose -f "$INSTALL_DIR/docker-compose.elastic.yml" down
-    echo "[ok] stopped Elastic Docker Compose stack"
+if [[ "$STOP_NATIVE_ELASTIC" == "1" ]]; then
+  systemctl disable --now ngav-kibana ngav-elasticsearch || true
+  rm -f /etc/systemd/system/ngav-kibana.service /etc/systemd/system/ngav-elasticsearch.service
+  systemctl daemon-reload
+  if [[ -d "$ELASTIC_DIR" ]]; then
+    rm -rf "$ELASTIC_DIR"
   fi
+  echo "[ok] removed native Elasticsearch/Kibana services and files"
 fi
 
 rm -f /etc/ngav-server.env

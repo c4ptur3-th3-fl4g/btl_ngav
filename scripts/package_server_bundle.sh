@@ -24,7 +24,6 @@ copy_path() {
 
 copy_path "agent" "$STAGE/agent"
 copy_path "config/config.example.yaml" "$STAGE/config/config.example.yaml"
-copy_path "docker-compose.elastic.yml" "$STAGE/docker-compose.elastic.yml"
 copy_path "INSTALL.md" "$STAGE/INSTALL.md"
 copy_path "requirements.txt" "$STAGE/requirements.txt"
 copy_path "requirements-gpu.txt" "$STAGE/requirements-gpu.txt"

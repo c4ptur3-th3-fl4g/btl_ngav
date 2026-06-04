@@ -23,11 +23,13 @@ One-click server install:
 sudo scripts/install_server.sh --server-ip <SERVER_IP>
 ```
 
+Elasticsearch/Kibana are installed natively by default. Docker is not used.
+
 The installer:
 - copies the server to `/opt/ngav-server`
 - creates a Python virtualenv
 - installs dependencies
-- starts Elasticsearch/Kibana with Docker Compose when Docker is available
+- installs native Elasticsearch/Kibana into `/opt/ngav-elastic`
 - creates and starts the `ngav-collector` systemd service
 - enables startup on boot
 - listens for agents on `0.0.0.0:8000`
@@ -45,14 +47,6 @@ Uninstall:
 
 ```bash
 sudo scripts/uninstall_server.sh --stop-elastic
-```
-
-Elastic web console:
-
-```bash
-docker compose -f docker-compose.elastic.yml up -d
-export ELASTICSEARCH_URL=http://localhost:9200
-uvicorn server.collector:app --host 0.0.0.0 --port 8000
 ```
 
 Open:
