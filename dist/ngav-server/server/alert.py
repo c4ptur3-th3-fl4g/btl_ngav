@@ -55,6 +55,14 @@ class AlertConfig:
     discord: DiscordConfig
 
 
+@dataclass
+class DeliveryResult:
+    channel: str
+    enabled: bool
+    sent: bool
+    error: Optional[str] = None
+
+
 def load_alert_config(config_path: Path = DEFAULT_CONFIG_PATH) -> AlertConfig:
     with Path(config_path).open("r", encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
@@ -129,10 +137,41 @@ def handle_detection(
 def handle_alert(alert: Dict[str, Any], config_path: Path = DEFAULT_CONFIG_PATH) -> None:
     config = load_alert_config(config_path)
     log_alert(alert)
-    send_email_alert(config.email, alert)
-    send_telegram_alert(config.telegram, alert)
-    send_discord_alert(config.discord, alert)
+    results = dispatch_alert(config, alert)
+    for result in results:
+        if result.enabled and not result.sent:
+            print(f"[warn] {result.channel} alert delivery failed: {result.error}")
     print("[ALERT]", json.dumps(alert, ensure_ascii=False))
+
+
+def dispatch_alert(config: AlertConfig, alert: Dict[str, Any]) -> List[DeliveryResult]:
+    return [
+        send_email_alert(config.email, alert),
+        send_telegram_alert(config.telegram, alert),
+        send_discord_alert(config.discord, alert),
+    ]
+
+
+def send_startup_notification(config_path: Path = DEFAULT_CONFIG_PATH) -> List[DeliveryResult]:
+    alert = {
+        "created_ts": time.time(),
+        "severity": "info",
+        "endpoint": "ngav-server",
+        "event_id": "server-startup",
+        "event_type": "server_startup",
+        "engine": "ngav-server",
+        "score": 0.0,
+        "threshold": 0.0,
+        "reason": "NGAV Server has started and alert delivery is being tested.",
+        "process": {
+            "pid": os.getpid(),
+            "name": "ngav-collector",
+            "exe": "uvicorn server.collector:app",
+            "platform": os.name,
+        },
+    }
+    config = load_alert_config(config_path)
+    return dispatch_alert(config, alert)
 
 
 def log_alert(alert: Dict[str, Any]) -> None:
@@ -142,12 +181,11 @@ def log_alert(alert: Dict[str, Any]) -> None:
     elastic_store.index_alert(alert)
 
 
-def send_email_alert(email_cfg: EmailConfig, alert: Dict[str, Any]) -> None:
+def send_email_alert(email_cfg: EmailConfig, alert: Dict[str, Any]) -> DeliveryResult:
     if not email_cfg.enabled:
-        return
+        return DeliveryResult("email", enabled=False, sent=False)
     if not (email_cfg.smtp_server and email_cfg.from_addr and email_cfg.to_addrs):
-        print("[warn] Email alert is enabled but SMTP config is incomplete.")
-        return
+        return DeliveryResult("email", enabled=True, sent=False, error="SMTP config is incomplete")
 
     subject, body = format_alert_message(alert)
     msg = MIMEText(body, "plain", "utf-8")
@@ -162,16 +200,17 @@ def send_email_alert(email_cfg: EmailConfig, alert: Dict[str, Any]) -> None:
             if email_cfg.username:
                 server.login(email_cfg.username, email_cfg.password)
             server.sendmail(email_cfg.from_addr, email_cfg.to_addrs, msg.as_string())
+        print("[ok] Email alert sent")
+        return DeliveryResult("email", enabled=True, sent=True)
     except Exception as ex:
-        print(f"[warn] Email alert error: {ex}")
+        return DeliveryResult("email", enabled=True, sent=False, error=str(ex))
 
 
-def send_telegram_alert(telegram_cfg: TelegramConfig, alert: Dict[str, Any]) -> None:
+def send_telegram_alert(telegram_cfg: TelegramConfig, alert: Dict[str, Any]) -> DeliveryResult:
     if not telegram_cfg.enabled:
-        return
+        return DeliveryResult("telegram", enabled=False, sent=False)
     if not (telegram_cfg.bot_token and telegram_cfg.chat_id):
-        print("[warn] Telegram alert is enabled but config is incomplete.")
-        return
+        return DeliveryResult("telegram", enabled=True, sent=False, error="bot_token or chat_id is missing")
 
     _, body = format_alert_message(alert)
     payload = parse.urlencode({"chat_id": telegram_cfg.chat_id, "text": body}).encode("utf-8")
@@ -184,17 +223,27 @@ def send_telegram_alert(telegram_cfg: TelegramConfig, alert: Dict[str, Any]) -> 
     try:
         with request.urlopen(req, timeout=20) as response:
             if response.status >= 400:
-                print(f"[warn] Telegram alert failed with status={response.status}")
+                body_text = response.read().decode("utf-8", errors="replace")
+                return DeliveryResult(
+                    "telegram",
+                    enabled=True,
+                    sent=False,
+                    error=f"HTTP {response.status}: {body_text}",
+                )
+            print(f"[ok] Telegram alert sent status={response.status}")
+            return DeliveryResult("telegram", enabled=True, sent=True)
+    except error.HTTPError as ex:
+        body_text = ex.read().decode("utf-8", errors="replace")
+        return DeliveryResult("telegram", enabled=True, sent=False, error=f"HTTP {ex.code}: {body_text}")
     except error.URLError as ex:
-        print(f"[warn] Telegram alert error: {ex}")
+        return DeliveryResult("telegram", enabled=True, sent=False, error=str(ex))
 
 
-def send_discord_alert(discord_cfg: DiscordConfig, alert: Dict[str, Any]) -> None:
+def send_discord_alert(discord_cfg: DiscordConfig, alert: Dict[str, Any]) -> DeliveryResult:
     if not discord_cfg.enabled:
-        return
+        return DeliveryResult("discord", enabled=False, sent=False)
     if not discord_cfg.webhook_url:
-        print("[warn] Discord alert is enabled but webhook_url is empty.")
-        return
+        return DeliveryResult("discord", enabled=True, sent=False, error="webhook_url is empty")
 
     subject, body = format_alert_message(alert)
     payload = {"content": f"**{subject}**\n```text\n{body}\n```"}
@@ -208,9 +257,20 @@ def send_discord_alert(discord_cfg: DiscordConfig, alert: Dict[str, Any]) -> Non
     try:
         with request.urlopen(req, timeout=20) as response:
             if response.status >= 400:
-                print(f"[warn] Discord alert failed with status={response.status}")
+                body_text = response.read().decode("utf-8", errors="replace")
+                return DeliveryResult(
+                    "discord",
+                    enabled=True,
+                    sent=False,
+                    error=f"HTTP {response.status}: {body_text}",
+                )
+            print(f"[ok] Discord alert sent status={response.status}")
+            return DeliveryResult("discord", enabled=True, sent=True)
+    except error.HTTPError as ex:
+        body_text = ex.read().decode("utf-8", errors="replace")
+        return DeliveryResult("discord", enabled=True, sent=False, error=f"HTTP {ex.code}: {body_text}")
     except error.URLError as ex:
-        print(f"[warn] Discord alert error: {ex}")
+        return DeliveryResult("discord", enabled=True, sent=False, error=str(ex))
 
 
 def format_alert_message(alert: Dict[str, Any]) -> tuple:

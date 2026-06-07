@@ -10,12 +10,12 @@ import secrets
 
 try:
     from .detector import NgavDetector
-    from .alert import handle_detection
+    from .alert import send_startup_notification, handle_detection
     from . import elastic_store
     from .web_ui import router as web_ui_router, set_agents_provider
 except ImportError:
     from detector import NgavDetector
-    from alert import handle_detection
+    from alert import send_startup_notification, handle_detection
     import elastic_store
     from web_ui import router as web_ui_router, set_agents_provider
 
@@ -94,15 +94,30 @@ app.include_router(web_ui_router)
 
 
 @app.on_event("startup")
-def check_elasticsearch_on_startup() -> None:
-    if not getattr(elastic_store, "REQUIRE_ELASTIC", False):
+def check_services_on_startup() -> None:
+    if getattr(elastic_store, "REQUIRE_ELASTIC", False):
+        result = elastic_store.check_connection(raise_on_error=True)
+        print(
+            "[ok] Elasticsearch connected "
+            f"url={result.get('url')} cluster={result.get('cluster_name')} "
+            f"status={result.get('cluster_status')}"
+        )
+
+    try:
+        results = send_startup_notification()
+    except Exception as ex:
+        print(f"[warn] startup notification failed before dispatch: {ex}")
         return
-    result = elastic_store.check_connection(raise_on_error=True)
-    print(
-        "[ok] Elasticsearch connected "
-        f"url={result.get('url')} cluster={result.get('cluster_name')} "
-        f"status={result.get('cluster_status')}"
-    )
+
+    enabled_results = [result for result in results if result.enabled]
+    if not enabled_results:
+        print("[info] startup notification skipped: no alert channel is enabled")
+        return
+    for result in enabled_results:
+        if result.sent:
+            print(f"[ok] startup notification sent via {result.channel}")
+        else:
+            print(f"[warn] startup notification failed via {result.channel}: {result.error}")
 
 
 def _append_event(evt: Dict[str, Any]) -> None:
