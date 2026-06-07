@@ -250,7 +250,11 @@ def send_discord_alert(discord_cfg: DiscordConfig, alert: Dict[str, Any]) -> Del
     req = request.Request(
         discord_cfg.webhook_url,
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "NGAV-Server/1.0 (+https://discord.com)",
+        },
         method="POST",
     )
 

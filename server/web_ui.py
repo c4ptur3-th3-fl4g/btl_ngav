@@ -1,14 +1,19 @@
 import html
 import json
+import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter
+import yaml
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse
 
 try:
     from . import elastic_store
+    from .alert import DEFAULT_CONFIG_PATH, send_startup_notification
 except ImportError:
     import elastic_store
+    from alert import DEFAULT_CONFIG_PATH, send_startup_notification
 
 
 router = APIRouter()
@@ -54,6 +59,41 @@ def elastic_detections(limit: int = 100, q: Optional[str] = None) -> Dict[str, A
 @router.get("/api/elastic/alerts")
 def elastic_alerts(limit: int = 100, q: Optional[str] = None) -> Dict[str, Any]:
     return {"alerts": elastic_store.search_documents(elastic_store.ALERTS_INDEX, limit=limit, query=q)}
+
+
+@router.get("/api/notifications/settings")
+def notification_settings() -> Dict[str, Any]:
+    config = _load_config()
+    return {"config_path": str(DEFAULT_CONFIG_PATH), "settings": _notification_config(config)}
+
+
+@router.post("/api/notifications/settings")
+def save_notification_settings(payload: Dict[str, Any]) -> Dict[str, Any]:
+    config = _load_config()
+    settings = payload.get("settings", payload)
+    _apply_notification_config(config, settings)
+    _write_config(config)
+    return {"status": "ok", "config_path": str(DEFAULT_CONFIG_PATH), "settings": _notification_config(config)}
+
+
+@router.post("/api/notifications/test")
+def test_notifications() -> Dict[str, Any]:
+    try:
+        results = send_startup_notification(config_path=DEFAULT_CONFIG_PATH)
+    except Exception as ex:
+        raise HTTPException(status_code=500, detail=str(ex))
+    return {
+        "status": "ok",
+        "results": [
+            {
+                "channel": result.channel,
+                "enabled": result.enabled,
+                "sent": result.sent,
+                "error": result.error,
+            }
+            for result in results
+        ],
+    }
 
 
 def _render_page(
@@ -199,6 +239,51 @@ def _render_page(
       border-radius: 6px;
       font: inherit;
     }}
+    .settings {{
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+      padding: 14px 16px;
+    }}
+    .channel {{
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      background: #fbfcfe;
+    }}
+    .channel h3 {{
+      margin: 0 0 10px;
+      font-size: 14px;
+    }}
+    .field {{
+      display: grid;
+      gap: 5px;
+      margin-bottom: 9px;
+    }}
+    .field label, .check {{
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+    }}
+    .field input, .field textarea {{
+      width: 100%;
+      box-sizing: border-box;
+      padding: 8px 9px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      font: inherit;
+      background: white;
+    }}
+    .field textarea {{
+      min-height: 72px;
+      resize: vertical;
+    }}
+    .actions {{
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      padding: 0 16px 14px;
+    }}
     .connect button {{
       padding: 8px 12px;
       border: 0;
@@ -207,6 +292,18 @@ def _render_page(
       color: white;
       font-weight: 700;
       cursor: pointer;
+    }}
+    .actions button {{
+      padding: 8px 12px;
+      border: 0;
+      border-radius: 6px;
+      background: var(--accent);
+      color: white;
+      font-weight: 700;
+      cursor: pointer;
+    }}
+    .actions button.secondary {{
+      background: #475569;
     }}
     .keybox {{
       margin: 0;
@@ -221,6 +318,7 @@ def _render_page(
     @media (max-width: 760px) {{
       header {{ align-items: flex-start; flex-direction: column; gap: 8px; }}
       .grid {{ grid-template-columns: 1fr; }}
+      .settings {{ grid-template-columns: 1fr; }}
       th:nth-child(4), td:nth-child(4) {{ display: none; }}
     }}
   </style>
@@ -248,6 +346,38 @@ def _render_page(
         <span class="muted">Generate an API key for an endpoint agent.</span>
       </div>
       <pre id="connect-result" class="keybox">Click Connect to generate an API key.</pre>
+    </section>
+    <section>
+      <h2>Notification Settings</h2>
+      <div class="settings">
+        <div class="channel">
+          <h3>Email / Gmail</h3>
+          <label class="check"><input id="email-enabled" type="checkbox"> Enabled</label>
+          <div class="field"><label>SMTP server</label><input id="email-smtp-server" value="smtp.gmail.com"></div>
+          <div class="field"><label>SMTP port</label><input id="email-smtp-port" type="number" value="587"></div>
+          <label class="check"><input id="email-use-tls" type="checkbox" checked> Use TLS</label>
+          <div class="field"><label>Username</label><input id="email-username"></div>
+          <div class="field"><label>Password / app password</label><input id="email-password" type="password"></div>
+          <div class="field"><label>From</label><input id="email-from"></div>
+          <div class="field"><label>To, one address per line</label><textarea id="email-to"></textarea></div>
+        </div>
+        <div class="channel">
+          <h3>Telegram</h3>
+          <label class="check"><input id="telegram-enabled" type="checkbox"> Enabled</label>
+          <div class="field"><label>Bot token</label><input id="telegram-bot-token" type="password"></div>
+          <div class="field"><label>Chat ID</label><input id="telegram-chat-id"></div>
+        </div>
+        <div class="channel">
+          <h3>Discord</h3>
+          <label class="check"><input id="discord-enabled" type="checkbox"> Enabled</label>
+          <div class="field"><label>Webhook URL</label><input id="discord-webhook-url" type="password"></div>
+        </div>
+      </div>
+      <div class="actions">
+        <button id="notification-save" type="button">Save Settings</button>
+        <button id="notification-test" class="secondary" type="button">Test Notifications</button>
+      </div>
+      <pre id="notification-result" class="keybox">Notification settings are loaded from config.yaml.</pre>
     </section>
     <section>
       <h2>Elastic Health</h2>
@@ -283,6 +413,109 @@ def _render_page(
         output.textContent = "Failed to generate API key: " + err;
       }}
     }});
+
+    const notifOutput = document.getElementById("notification-result");
+    const notificationFields = {{
+      emailEnabled: document.getElementById("email-enabled"),
+      emailSmtpServer: document.getElementById("email-smtp-server"),
+      emailSmtpPort: document.getElementById("email-smtp-port"),
+      emailUseTls: document.getElementById("email-use-tls"),
+      emailUsername: document.getElementById("email-username"),
+      emailPassword: document.getElementById("email-password"),
+      emailFrom: document.getElementById("email-from"),
+      emailTo: document.getElementById("email-to"),
+      telegramEnabled: document.getElementById("telegram-enabled"),
+      telegramBotToken: document.getElementById("telegram-bot-token"),
+      telegramChatId: document.getElementById("telegram-chat-id"),
+      discordEnabled: document.getElementById("discord-enabled"),
+      discordWebhookUrl: document.getElementById("discord-webhook-url")
+    }};
+
+    function collectNotificationSettings() {{
+      return {{
+        email: {{
+          enabled: notificationFields.emailEnabled.checked,
+          smtp_server: notificationFields.emailSmtpServer.value.trim(),
+          smtp_port: Number(notificationFields.emailSmtpPort.value || 587),
+          use_tls: notificationFields.emailUseTls.checked,
+          username: notificationFields.emailUsername.value.trim(),
+          password: notificationFields.emailPassword.value,
+          from: notificationFields.emailFrom.value.trim(),
+          to: notificationFields.emailTo.value.split(/\\r?\\n/).map(v => v.trim()).filter(Boolean)
+        }},
+        telegram: {{
+          enabled: notificationFields.telegramEnabled.checked,
+          bot_token: notificationFields.telegramBotToken.value.trim(),
+          chat_id: notificationFields.telegramChatId.value.trim()
+        }},
+        discord: {{
+          enabled: notificationFields.discordEnabled.checked,
+          webhook_url: notificationFields.discordWebhookUrl.value.trim()
+        }}
+      }};
+    }}
+
+    function fillNotificationSettings(settings) {{
+      const email = settings.email || {{}};
+      const telegram = settings.telegram || {{}};
+      const discord = settings.discord || {{}};
+      notificationFields.emailEnabled.checked = Boolean(email.enabled);
+      notificationFields.emailSmtpServer.value = email.smtp_server || "smtp.gmail.com";
+      notificationFields.emailSmtpPort.value = email.smtp_port || 587;
+      notificationFields.emailUseTls.checked = email.use_tls !== false;
+      notificationFields.emailUsername.value = email.username || "";
+      notificationFields.emailPassword.value = email.password || "";
+      notificationFields.emailFrom.value = email.from || "";
+      notificationFields.emailTo.value = (email.to || []).join("\\n");
+      notificationFields.telegramEnabled.checked = Boolean(telegram.enabled);
+      notificationFields.telegramBotToken.value = telegram.bot_token || "";
+      notificationFields.telegramChatId.value = telegram.chat_id || "";
+      notificationFields.discordEnabled.checked = Boolean(discord.enabled);
+      notificationFields.discordWebhookUrl.value = discord.webhook_url || "";
+    }}
+
+    async function loadNotificationSettings() {{
+      try {{
+        const response = await fetch("/api/notifications/settings");
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.detail || JSON.stringify(payload));
+        fillNotificationSettings(payload.settings || {{}});
+        notifOutput.textContent = "Loaded from " + payload.config_path;
+      }} catch (err) {{
+        notifOutput.textContent = "Failed to load notification settings: " + err;
+      }}
+    }}
+
+    document.getElementById("notification-save").addEventListener("click", async () => {{
+      notifOutput.textContent = "Saving notification settings...";
+      try {{
+        const response = await fetch("/api/notifications/settings", {{
+          method: "POST",
+          headers: {{"Content-Type": "application/json"}},
+          body: JSON.stringify({{settings: collectNotificationSettings()}})
+        }});
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.detail || JSON.stringify(payload));
+        fillNotificationSettings(payload.settings || {{}});
+        notifOutput.textContent = "Saved to " + payload.config_path;
+      }} catch (err) {{
+        notifOutput.textContent = "Failed to save notification settings: " + err;
+      }}
+    }});
+
+    document.getElementById("notification-test").addEventListener("click", async () => {{
+      notifOutput.textContent = "Sending test notification...";
+      try {{
+        const response = await fetch("/api/notifications/test", {{method: "POST"}});
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.detail || JSON.stringify(payload));
+        notifOutput.textContent = JSON.stringify(payload.results, null, 2);
+      }} catch (err) {{
+        notifOutput.textContent = "Failed to send test notification: " + err;
+      }}
+    }});
+
+    loadNotificationSettings();
   </script>
 </body>
 </html>"""
@@ -315,3 +548,99 @@ def _format_cell(column: str, value: Any) -> str:
     if isinstance(value, (dict, list)):
         return html.escape(json.dumps(value, ensure_ascii=False)[:240])
     return html.escape(str(value))
+
+
+def _load_config() -> Dict[str, Any]:
+    path = Path(DEFAULT_CONFIG_PATH)
+    if not path.exists():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    except Exception as ex:
+        raise HTTPException(status_code=500, detail=f"cannot read config {path}: {ex}")
+
+
+def _write_config(config: Dict[str, Any]) -> None:
+    path = Path(DEFAULT_CONFIG_PATH)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        with tmp_path.open("w", encoding="utf-8") as f:
+            yaml.safe_dump(config, f, sort_keys=False, allow_unicode=True)
+        os.replace(tmp_path, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    except Exception as ex:
+        raise HTTPException(status_code=500, detail=f"cannot write config {path}: {ex}")
+
+
+def _notification_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    email = dict(config.get("email") or {})
+    telegram = dict(config.get("telegram") or {})
+    discord = dict(config.get("discord") or {})
+    return {
+        "email": {
+            "enabled": bool(email.get("enabled", False)),
+            "smtp_server": str(email.get("smtp_server", "smtp.gmail.com")),
+            "smtp_port": int(email.get("smtp_port", 587) or 587),
+            "use_tls": bool(email.get("use_tls", True)),
+            "username": str(email.get("username", "")),
+            "password": str(email.get("password", "")),
+            "from": str(email.get("from", "")),
+            "to": list(email.get("to") or []),
+        },
+        "telegram": {
+            "enabled": bool(telegram.get("enabled", False)),
+            "bot_token": str(telegram.get("bot_token", "")),
+            "chat_id": str(telegram.get("chat_id", "")),
+        },
+        "discord": {
+            "enabled": bool(discord.get("enabled", False)),
+            "webhook_url": str(discord.get("webhook_url", "")),
+        },
+    }
+
+
+def _apply_notification_config(config: Dict[str, Any], settings: Dict[str, Any]) -> None:
+    current = _notification_config(config)
+    email = dict(settings.get("email") or {})
+    telegram = dict(settings.get("telegram") or {})
+    discord = dict(settings.get("discord") or {})
+
+    config["email"] = {
+        "enabled": bool(email.get("enabled", False)),
+        "smtp_server": str(email.get("smtp_server") or current["email"]["smtp_server"]),
+        "smtp_port": _as_int(email.get("smtp_port"), current["email"]["smtp_port"]),
+        "use_tls": bool(email.get("use_tls", True)),
+        "username": str(email.get("username", "")),
+        "password": str(email.get("password", "")),
+        "from": str(email.get("from", "")),
+        "to": _as_string_list(email.get("to")),
+    }
+    config["telegram"] = {
+        "enabled": bool(telegram.get("enabled", False)),
+        "bot_token": str(telegram.get("bot_token", "")),
+        "chat_id": str(telegram.get("chat_id", "")),
+    }
+    config["discord"] = {
+        "enabled": bool(discord.get("enabled", False)),
+        "webhook_url": str(discord.get("webhook_url", "")),
+    }
+
+
+def _as_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_string_list(value: Any) -> List[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        return [line.strip() for line in value.splitlines() if line.strip()]
+    return []
