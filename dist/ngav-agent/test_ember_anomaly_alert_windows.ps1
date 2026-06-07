@@ -7,17 +7,6 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-function Get-DefaultRoot {
-  $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-  if ($scriptRoot -and (Test-Path (Join-Path $scriptRoot "config\config.yaml"))) {
-    return $scriptRoot
-  }
-  if (Test-Path (Join-Path $InstallDir "config\config.yaml")) {
-    return $InstallDir
-  }
-  return $scriptRoot
-}
-
 function Get-CollectorUrlFromConfig {
   param([string]$ConfigPath)
   if (-not (Test-Path $ConfigPath)) {
@@ -39,11 +28,26 @@ function Get-CollectorUrlFromConfig {
   return ""
 }
 
-$Root = Get-DefaultRoot
-$ConfigPath = Join-Path $Root "config\config.yaml"
-$KeyPath = Join-Path $Root "agent\api_key.txt"
+$PossibleRoots = @(
+  $InstallDir,
+  (Join-Path $env:ProgramData "NGAV-Agent"),
+  (Get-Location).Path
+) | Where-Object { $_ -and ($_ -ne "") } | Select-Object -Unique
 
-if (-not $ServerUrl) {
+$ConfigPath = ""
+$KeyPath = ""
+foreach ($Root in $PossibleRoots) {
+  $MaybeConfig = Join-Path $Root "config\config.yaml"
+  $MaybeKey = Join-Path $Root "agent\api_key.txt"
+  if (-not $ConfigPath -and (Test-Path $MaybeConfig)) {
+    $ConfigPath = $MaybeConfig
+  }
+  if (-not $KeyPath -and (Test-Path $MaybeKey)) {
+    $KeyPath = $MaybeKey
+  }
+}
+
+if (-not $ServerUrl -and $ConfigPath) {
   $ServerUrl = Get-CollectorUrlFromConfig -ConfigPath $ConfigPath
 }
 if (-not $ServerUrl) {
@@ -51,7 +55,7 @@ if (-not $ServerUrl) {
 }
 $ServerUrl = $ServerUrl.TrimEnd("/")
 
-if (-not $ApiKey -and (Test-Path $KeyPath)) {
+if (-not $ApiKey -and $KeyPath -and (Test-Path $KeyPath)) {
   $ApiKey = (Get-Content $KeyPath -Raw).Trim()
 }
 if (-not $ApiKey) {
