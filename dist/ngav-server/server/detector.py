@@ -69,7 +69,12 @@ class NgavDetector:
                 if ember_path.exists() and resolved_ember_path not in [path.resolve() for path in model_paths]:
                     model_paths.append(resolved_ember_path)
 
-        self.models = [_load_model_runner(path, threshold=threshold) for path in model_paths]
+        self.models = []
+        for path in model_paths:
+            try:
+                self.models.append(_load_model_runner(path, threshold=threshold))
+            except Exception as ex:
+                print(f"[warn] failed to load NGAV model {path}: {ex}")
         if not self.models:
             raise ValueError("no NGAV models were loaded")
 
