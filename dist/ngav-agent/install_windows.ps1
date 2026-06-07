@@ -2,7 +2,10 @@ param(
   [switch]$Task,
   [string]$InstallDir = "$env:ProgramData\NGAV-Agent",
   [string]$TaskName = "NGAV Agent",
-  [string]$WatchPaths = ""
+  [string]$WatchPaths = "",
+  [string]$ServerIp = "",
+  [string]$ServerUrl = "",
+  [string]$ApiKey = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -38,6 +41,44 @@ if ($Task) {
 & $Python -m venv .venv
 & .\.venv\Scripts\python.exe -m pip install --upgrade pip
 & .\.venv\Scripts\pip.exe install -r requirements-agent.txt
+
+if (-not $ServerUrl) {
+  if (-not $ServerIp) {
+    $ServerIp = Read-Host "NGAV server IP"
+  }
+  if ($ServerIp) {
+    $ServerUrl = "http://$ServerIp`:8000"
+  }
+}
+if (-not $ApiKey) {
+  $ApiKey = Read-Host "NGAV API key from Server UI Connect button"
+}
+
+if ($ServerUrl -or $ApiKey) {
+  $env:SERVER_URL = $ServerUrl
+  $env:API_KEY = $ApiKey
+  $ConfigureScript = Join-Path $Root "_configure_agent.py"
+  @'
+import os
+from pathlib import Path
+import yaml
+
+config_path = Path("config/config.yaml")
+raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+if os.environ.get("SERVER_URL"):
+    raw.setdefault("collector", {})["url"] = os.environ["SERVER_URL"].rstrip("/")
+raw.setdefault("collector", {})["api_key_path"] = "../agent/api_key.txt"
+config_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+api_key = os.environ.get("API_KEY", "").strip()
+if api_key:
+    key_path = Path("agent/api_key.txt")
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    key_path.write_text(api_key + "\n", encoding="utf-8")
+'@ | Set-Content -Encoding UTF8 $ConfigureScript
+  & .\.venv\Scripts\python.exe $ConfigureScript
+  Remove-Item -Force $ConfigureScript
+}
 
 if ($Task) {
   $runScript = Join-Path $InstallDir "run_agent.ps1"

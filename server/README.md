@@ -29,10 +29,12 @@ The installer:
 - copies the server to `/opt/ngav-server`
 - creates a Python virtualenv
 - installs dependencies
+- generates `/opt/ngav-server/config/config.yaml`
 - installs native Elasticsearch/Kibana into `/opt/ngav-elastic`
 - creates and starts the `ngav-collector` systemd service
 - enables startup on boot
 - listens for agents on `0.0.0.0:8000`
+- binds native ELK to `<SERVER_IP>:9200` and `<SERVER_IP>:5601`
 - generates an endpoint bundle at `/opt/ngav-server/dist/ngav-agent.zip`
 
 Useful server commands:
@@ -46,12 +48,15 @@ curl http://<SERVER_IP>:8000/agents
 Uninstall:
 
 ```bash
-sudo scripts/uninstall_server.sh --stop-elastic
+sudo scripts/uninstall_server.sh
 ```
 
+Use `--keep-elk` only when you intentionally want Elasticsearch/Kibana to keep running.
+
 Open:
-- NGAV web console: http://localhost:8000/ui
-- Kibana: http://localhost:5601
+- NGAV web console: http://<SERVER_IP>:8000/ui
+- Kibana: http://<SERVER_IP>:5601
+- Elasticsearch: http://<SERVER_IP>:9200
 
 The collector writes to these Elasticsearch indices:
 - `ngav-events`

@@ -15,13 +15,13 @@ email:
     - soc_team@example.com
 
 telegram:
-  enabled: true
-  bot_token: 1234567890:your_telegram_bot_token
-  chat_id: "-1001234567890"
+  enabled: false
+  bot_token: ""
+  chat_id: ""
 
 discord:
-  enabled: true
-  webhook_url: https://discord.com/api/webhooks/your_webhook_id/your_webhook_token
+  enabled: false
+  webhook_url: ""
 
 agent:
   endpoint_name: auto

@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import smtplib
 import time
 from dataclasses import dataclass
@@ -17,7 +18,7 @@ except ImportError:
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "config.yaml"
+DEFAULT_CONFIG_PATH = Path(os.getenv("NGAV_CONFIG", PROJECT_ROOT / "config" / "config.yaml"))
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 ALERTS_FILE = LOG_DIR / "alerts.jsonl"
 

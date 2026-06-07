@@ -7,7 +7,9 @@ ELASTIC_VERSION="8.14.3"
 HOST="0.0.0.0"
 PORT="8000"
 SERVER_IP=""
+ELASTIC_HOST=""
 NO_ELASTIC="0"
+FORCE_CONFIG="0"
 SERVICE_NAME="ngav-collector"
 
 usage() {
@@ -21,6 +23,8 @@ Options:
   --host HOST          Bind host for collector. Default: 0.0.0.0
   --port PORT          Bind port for collector. Default: 8000
   --server-ip IP       IP agents should connect to. Default: first local non-loopback IP
+  --elastic-host HOST  Bind host/IP for Elasticsearch and Kibana. Default: server IP
+  --force-config       Regenerate config/config.yaml even if it already exists
   --no-elastic         Skip native Elasticsearch/Kibana install
   --elastic-native     Accepted for compatibility; native install is now the default
 
@@ -40,6 +44,8 @@ while [[ $# -gt 0 ]]; do
     --host) HOST="$2"; shift 2 ;;
     --port) PORT="$2"; shift 2 ;;
     --server-ip) SERVER_IP="$2"; shift 2 ;;
+    --elastic-host) ELASTIC_HOST="$2"; shift 2 ;;
+    --force-config) FORCE_CONFIG="1"; shift ;;
     --no-elastic) NO_ELASTIC="1"; shift ;;
     --elastic-native) shift ;;
     -h|--help) usage; exit 0 ;;
@@ -138,16 +144,16 @@ cluster.name: ngav-cluster
 node.name: ngav-server
 path.data: $ELASTIC_DIR/elasticsearch-data
 path.logs: $ELASTIC_DIR/elasticsearch-logs
-network.host: 127.0.0.1
+network.host: $ELASTIC_HOST
 http.port: 9200
 discovery.type: single-node
 xpack.security.enabled: false
 ESCONF
 
   cat >"$ELASTIC_DIR/kibana/config/kibana.yml" <<KIBCONF
-server.host: "0.0.0.0"
+server.host: "$ELASTIC_HOST"
 server.port: 5601
-elasticsearch.hosts: ["http://127.0.0.1:9200"]
+elasticsearch.hosts: ["$ELASTIC_URL"]
 path.data: "$ELASTIC_DIR/kibana-data"
 KIBCONF
 
@@ -199,9 +205,9 @@ SERVICE
 
   systemctl daemon-reload
   systemctl enable --now ngav-elasticsearch
-  echo "[info] waiting for native Elasticsearch at http://127.0.0.1:9200"
+  echo "[info] waiting for native Elasticsearch at $ELASTIC_URL"
   for _ in $(seq 1 60); do
-    if curl -fsS http://127.0.0.1:9200 >/dev/null 2>&1; then
+    if curl -fsS "$ELASTIC_URL" >/dev/null 2>&1; then
       echo "[ok] native Elasticsearch is ready"
       systemctl enable --now ngav-kibana
       return 0
@@ -211,6 +217,63 @@ SERVICE
   echo "[warn] Elasticsearch did not respond yet; check: journalctl -u ngav-elasticsearch -f"
 }
 
+generate_server_config() {
+  local config_dir="$INSTALL_DIR/config"
+  local config_path="$config_dir/config.yaml"
+
+  mkdir -p "$config_dir"
+  if [[ -f "$config_path" && "$FORCE_CONFIG" != "1" ]]; then
+    echo "[info] keeping existing server config: $config_path"
+    return 0
+  fi
+
+  cat >"$config_path" <<CONFIG
+scan_interval_seconds: 20
+cooldown_seconds: 600
+score_threshold: null
+model_path: ../models/ngav.pkl
+
+server:
+  host: "$HOST"
+  port: $PORT
+  public_url: "http://$SERVER_IP:$PORT"
+
+elastic:
+  enabled: true
+  url: "$ELASTIC_URL"
+  kibana_url: "http://$ELASTIC_HOST:5601"
+
+email:
+  enabled: false
+  smtp_server: smtp.gmail.com
+  smtp_port: 587
+  use_tls: true
+  username: ""
+  password: ""
+  from: ""
+  to: []
+
+telegram:
+  enabled: false
+  bot_token: ""
+  chat_id: ""
+
+discord:
+  enabled: false
+  webhook_url: ""
+
+agent:
+  endpoint_name: auto
+  include_process_name_patterns: []
+  exclude_process_names:
+    - systemd
+    - kthreadd
+CONFIG
+
+  chmod 600 "$config_path"
+  echo "[ok] generated server config: $config_path"
+}
+
 if [[ -z "$SERVER_IP" ]]; then
   SERVER_IP="$(detect_ip)"
 fi
@@ -218,6 +281,11 @@ if [[ -z "$SERVER_IP" ]]; then
   echo "[error] could not detect server IP. Pass --server-ip <IP>"
   exit 1
 fi
+if [[ -z "$ELASTIC_HOST" ]]; then
+  ELASTIC_HOST="$SERVER_IP"
+fi
+
+ELASTIC_URL="http://${ELASTIC_HOST}:9200"
 
 echo "[info] installing NGAV server to $INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
@@ -238,13 +306,16 @@ cd "$INSTALL_DIR"
 ".venv/bin/pip" install --upgrade pip
 ".venv/bin/pip" install -r requirements.txt
 
-ELASTIC_URL="http://127.0.0.1:9200"
 if [[ "$NO_ELASTIC" != "1" ]]; then
   install_elastic_native
 fi
 
+generate_server_config
+
 cat >/etc/ngav-server.env <<ENV
 ELASTICSEARCH_URL=$ELASTIC_URL
+NGAV_CONFIG=$INSTALL_DIR/config/config.yaml
+NGAV_REQUIRE_ELASTIC=1
 PYTHONUNBUFFERED=1
 ENV
 
@@ -271,6 +342,7 @@ systemctl enable --now "$SERVICE_NAME"
 if command -v ufw >/dev/null 2>&1; then
   ufw allow "$PORT"/tcp >/dev/null 2>&1 || true
   ufw allow 5601/tcp >/dev/null 2>&1 || true
+  ufw allow 9200/tcp >/dev/null 2>&1 || true
 fi
 
 COLLECTOR_URL="http://${SERVER_IP}:${PORT}"
@@ -280,6 +352,9 @@ echo "[info] building endpoint agent bundle for $COLLECTOR_URL"
 echo "[ok] NGAV collector installed and started"
 echo "[ok] collector URL for agents: $COLLECTOR_URL"
 echo "[ok] web console: $COLLECTOR_URL/ui"
+echo "[ok] Elasticsearch URL: $ELASTIC_URL"
+echo "[ok] Kibana URL: http://${ELASTIC_HOST}:5601"
+echo "[ok] server config: $INSTALL_DIR/config/config.yaml"
 echo "[ok] generated agent bundle: $INSTALL_DIR/dist/ngav-agent.zip"
 echo
 echo "Useful commands:"

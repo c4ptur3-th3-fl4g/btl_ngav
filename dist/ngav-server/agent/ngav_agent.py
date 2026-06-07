@@ -710,7 +710,17 @@ def _register_with_collector(cfg: AgentConfig) -> Optional[str]:
 
     # POST to collector /register_agent
     try:
-        payload = json.dumps({"endpoint": cfg.endpoint_name, "api_key": key}).encode("utf-8")
+        payload = json.dumps(
+            {
+                "endpoint": cfg.endpoint_name,
+                "api_key": key,
+                "os": platform.platform(),
+                "os_name": platform.system(),
+                "os_version": platform.version(),
+                "hostname": socket.gethostname(),
+                "machine": platform.machine(),
+            }
+        ).encode("utf-8")
         url = urlparse.urljoin(cfg.collector_url, "/register_agent")
         req = request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
         with request.urlopen(req, timeout=10) as resp:

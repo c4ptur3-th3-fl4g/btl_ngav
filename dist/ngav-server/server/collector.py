@@ -5,19 +5,19 @@ from pathlib import Path
 import json
 import uuid
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 import secrets
 
 try:
     from .detector import NgavDetector
     from .alert import handle_detection
     from . import elastic_store
-    from .web_ui import router as web_ui_router
+    from .web_ui import router as web_ui_router, set_agents_provider
 except ImportError:
     from detector import NgavDetector
     from alert import handle_detection
     import elastic_store
-    from web_ui import router as web_ui_router
+    from web_ui import router as web_ui_router, set_agents_provider
 
 
 # Logs and keys directory
@@ -58,7 +58,13 @@ def _append_key(rec: Dict[str, Any]) -> None:
 _load_keys()
 
 
-def _touch_agent(api_key: str, endpoint: str, remote_addr: Optional[str], event_type: Optional[str] = None) -> None:
+def _touch_agent(
+    api_key: str,
+    endpoint: str,
+    remote_addr: Optional[str],
+    event_type: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
     rec = _KEYS.get(api_key)
     if not rec:
         return
@@ -67,6 +73,10 @@ def _touch_agent(api_key: str, endpoint: str, remote_addr: Optional[str], event_
     rec["last_remote_addr"] = remote_addr
     if event_type:
         rec["last_event_type"] = event_type
+    if metadata:
+        for key in ["os", "os_name", "os_version", "hostname", "machine"]:
+            if metadata.get(key):
+                rec[key] = metadata[key]
 
 
 
@@ -79,7 +89,20 @@ class AgentEvent(BaseModel):
 
 
 app = FastAPI(title="NGAV Collector")
+set_agents_provider(lambda: get_agent_records(redact_api_key=True))
 app.include_router(web_ui_router)
+
+
+@app.on_event("startup")
+def check_elasticsearch_on_startup() -> None:
+    if not getattr(elastic_store, "REQUIRE_ELASTIC", False):
+        return
+    result = elastic_store.check_connection(raise_on_error=True)
+    print(
+        "[ok] Elasticsearch connected "
+        f"url={result.get('url')} cluster={result.get('cluster_name')} "
+        f"status={result.get('cluster_status')}"
+    )
 
 
 def _append_event(evt: Dict[str, Any]) -> None:
@@ -158,6 +181,15 @@ async def ingest(event: AgentEvent, request: Request):
 class AgentRegistration(BaseModel):
     endpoint: str
     api_key: Optional[str] = None
+    os: Optional[str] = None
+    os_name: Optional[str] = None
+    os_version: Optional[str] = None
+    hostname: Optional[str] = None
+    machine: Optional[str] = None
+
+
+class ConnectKeyRequest(BaseModel):
+    endpoint: Optional[str] = "manual-agent"
 
 
 @app.post("/register_agent")
@@ -167,12 +199,17 @@ def register_agent(reg: AgentRegistration, request: Request):
     remote_addr = request.client.host if request.client else None
     if key in _KEYS:
         # already registered
-        _touch_agent(key, reg.endpoint, remote_addr, "register")
+        _touch_agent(key, reg.endpoint, remote_addr, "register", metadata=reg.dict())
         return {"status": "exists", "api_key": key}
 
     rec = {
         "api_key": key,
         "endpoint": reg.endpoint,
+        "os": reg.os,
+        "os_name": reg.os_name,
+        "os_version": reg.os_version,
+        "hostname": reg.hostname,
+        "machine": reg.machine,
         "created_ts": time.time(),
         "last_seen_ts": time.time(),
         "last_remote_addr": remote_addr,
@@ -186,22 +223,51 @@ def register_agent(reg: AgentRegistration, request: Request):
     return {"status": "ok", "api_key": key}
 
 
+@app.post("/api/agent/connect-key")
+def create_connect_key(req: ConnectKeyRequest, request: Request):
+    key = secrets.token_urlsafe(32)
+    endpoint = (req.endpoint or "manual-agent").strip() or "manual-agent"
+    rec = {
+        "api_key": key,
+        "endpoint": endpoint,
+        "created_ts": time.time(),
+        "last_seen_ts": None,
+        "last_remote_addr": request.client.host if request.client else None,
+        "last_event_type": "connect-key-created",
+    }
+    try:
+        _append_key(rec)
+    except Exception as ex:
+        raise HTTPException(status_code=500, detail=str(ex))
+    return {"status": "ok", "endpoint": endpoint, "api_key": key}
+
+
 @app.get("/agents")
 def list_agents():
+    return {"agents": get_agent_records(redact_api_key=True)}
+
+
+def get_agent_records(redact_api_key: bool = True) -> List[Dict[str, Any]]:
     agents = []
     for rec in _KEYS.values():
+        api_key = "[redacted]" if redact_api_key else rec.get("api_key")
         agents.append(
             {
                 "endpoint": rec.get("endpoint"),
+                "hostname": rec.get("hostname"),
+                "os": rec.get("os"),
+                "os_name": rec.get("os_name"),
+                "os_version": rec.get("os_version"),
+                "machine": rec.get("machine"),
                 "created_ts": rec.get("created_ts"),
                 "last_seen_ts": rec.get("last_seen_ts"),
                 "last_remote_addr": rec.get("last_remote_addr"),
                 "last_event_type": rec.get("last_event_type"),
-                "api_key": "[redacted]",
+                "api_key": api_key,
             }
         )
     agents.sort(key=lambda item: item.get("last_seen_ts") or 0, reverse=True)
-    return {"agents": agents}
+    return agents
 
 
 @app.get("/events")

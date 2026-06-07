@@ -12,6 +12,12 @@ except ImportError:
 
 
 router = APIRouter()
+_AGENTS_PROVIDER = None
+
+
+def set_agents_provider(provider) -> None:
+    global _AGENTS_PROVIDER
+    _AGENTS_PROVIDER = provider
 
 
 @router.get("/ui", response_class=HTMLResponse)
@@ -21,7 +27,8 @@ def dashboard() -> str:
     detections = elastic_store.search_documents(elastic_store.DETECTIONS_INDEX, limit=25)
     alerts = elastic_store.search_documents(elastic_store.ALERTS_INDEX, limit=25)
     events = elastic_store.search_documents(elastic_store.EVENTS_INDEX, limit=25)
-    return _render_page(health=health, stats=stats, detections=detections, alerts=alerts, events=events)
+    agents = _AGENTS_PROVIDER() if _AGENTS_PROVIDER else []
+    return _render_page(health=health, stats=stats, detections=detections, alerts=alerts, events=events, agents=agents)
 
 
 @router.get("/api/elastic/health")
@@ -55,6 +62,7 @@ def _render_page(
     detections: List[Dict[str, Any]],
     alerts: List[Dict[str, Any]],
     events: List[Dict[str, Any]],
+    agents: List[Dict[str, Any]],
 ) -> str:
     status = "Online" if health.get("enabled") else "Offline"
     status_class = "ok" if health.get("enabled") else "bad"
@@ -177,6 +185,33 @@ def _render_page(
     }}
     .badtext {{ color: var(--bad); font-weight: 700; }}
     .muted {{ color: var(--muted); }}
+    .connect {{
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      padding: 14px 16px;
+    }}
+    .connect input {{
+      min-width: 220px;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      font: inherit;
+    }}
+    .connect button {{
+      padding: 8px 12px;
+      border: 0;
+      border-radius: 6px;
+      background: var(--accent);
+      color: white;
+      font-weight: 700;
+      cursor: pointer;
+    }}
+    .keybox {{
+      margin: 0;
+      padding: 0 16px 14px;
+    }}
     pre {{
       margin: 0;
       white-space: pre-wrap;
@@ -202,13 +237,53 @@ def _render_page(
       {_metric("Alerts", stats.get("alerts", 0))}
     </div>
     {_table("Recent Alerts", alerts, ["@timestamp", "severity", "endpoint", "engine", "reason"])}
+    {_table("Connected Devices", agents, ["endpoint", "last_remote_addr", "os_name", "os_version", "hostname", "last_seen_ts"])}
     {_table("Recent Detections", detections, ["@timestamp", "model_name", "endpoint", "event_type", "score", "is_anomaly"])}
     {_table("Recent Events", events, ["@timestamp", "endpoint", "event_type", "remote_addr", "id"])}
+    <section>
+      <h2>Agent Connect</h2>
+      <div class="connect">
+        <input id="connect-endpoint" value="manual-agent" aria-label="Endpoint name">
+        <button id="connect-button" type="button">Connect</button>
+        <span class="muted">Generate an API key for an endpoint agent.</span>
+      </div>
+      <pre id="connect-result" class="keybox">Click Connect to generate an API key.</pre>
+    </section>
     <section>
       <h2>Elastic Health</h2>
       <pre>{html.escape(json.dumps(health, indent=2, ensure_ascii=False))}</pre>
     </section>
   </main>
+  <script>
+    const button = document.getElementById("connect-button");
+    const output = document.getElementById("connect-result");
+    const endpoint = document.getElementById("connect-endpoint");
+    button.addEventListener("click", async () => {{
+      output.textContent = "Generating API key...";
+      try {{
+        const response = await fetch("/api/agent/connect-key", {{
+          method: "POST",
+          headers: {{"Content-Type": "application/json"}},
+          body: JSON.stringify({{endpoint: endpoint.value || "manual-agent"}})
+        }});
+        const payload = await response.json();
+        if (!response.ok) {{
+          throw new Error(payload.detail || JSON.stringify(payload));
+        }}
+        const origin = window.location.origin;
+        output.textContent =
+          "Server URL: " + origin + "\\n" +
+          "Endpoint: " + payload.endpoint + "\\n" +
+          "API Key: " + payload.api_key + "\\n\\n" +
+          "Linux install example:\\n" +
+          "sudo ./install_linux.sh --systemd --server-url " + origin + " --api-key " + payload.api_key + "\\n\\n" +
+          "Windows install example:\\n" +
+          ".\\\\install_windows.ps1 -Task -ServerUrl " + origin + " -ApiKey " + payload.api_key;
+      }} catch (err) {{
+        output.textContent = "Failed to generate API key: " + err;
+      }}
+    }});
+  </script>
 </body>
 </html>"""
 

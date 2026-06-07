@@ -20,7 +20,8 @@ AGENT_REQUIREMENTS = [
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build a deployable NGAV agent bundle")
-    parser.add_argument("--collector-url", required=True, help="Collector URL, for example http://10.0.0.5:8000")
+    parser.add_argument("--collector-url", default="http://SERVER_IP:8000", help="Collector URL, for example http://10.0.0.5:8000")
+    parser.add_argument("--api-key", default="", help="Optional pre-shared API key to write into the bundle")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="Directory for generated bundle")
     parser.add_argument("--name", default="ngav-agent", help="Bundle directory name")
     parser.add_argument("--no-zip", action="store_true", help="Only create directory, skip .zip archive")
@@ -35,6 +36,8 @@ def main() -> None:
     copy_tree(PROJECT_ROOT / "agent", bundle_dir / "agent", patterns=["*.py"])
     (bundle_dir / "config").mkdir(parents=True, exist_ok=True)
     write_agent_config(bundle_dir / "config" / "config.yaml", args.collector_url)
+    if args.api_key:
+        (bundle_dir / "agent" / "api_key.txt").write_text(args.api_key.strip() + "\n", encoding="utf-8")
     write_requirements(bundle_dir / "requirements-agent.txt")
     write_linux_scripts(bundle_dir)
     write_windows_scripts(bundle_dir)
@@ -96,6 +99,26 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+SYSTEMD="0"
+SERVER_IP="${SERVER_IP:-}"
+SERVER_URL="${SERVER_URL:-}"
+API_KEY="${API_KEY:-}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --systemd) SYSTEMD="1"; shift ;;
+    --server-ip) SERVER_IP="$2"; shift 2 ;;
+    --server-url) SERVER_URL="$2"; shift 2 ;;
+    --api-key) API_KEY="$2"; shift 2 ;;
+    -h|--help)
+      cat <<USAGE
+Usage: $0 [--systemd] [--server-ip IP | --server-url URL] [--api-key KEY]
+USAGE
+      exit 0
+      ;;
+    *) echo "[error] unknown option: $1"; exit 1 ;;
+  esac
+done
 
 cd "$ROOT"
 "$PYTHON_BIN" -m venv .venv
@@ -104,7 +127,40 @@ cd "$ROOT"
 
 chmod +x run_agent.sh
 
-if [[ "${1:-}" == "--systemd" ]]; then
+if [[ -z "$SERVER_URL" ]]; then
+  if [[ -z "$SERVER_IP" && -t 0 ]]; then
+    read -r -p "NGAV server IP: " SERVER_IP
+  fi
+  if [[ -n "$SERVER_IP" ]]; then
+    SERVER_URL="http://${SERVER_IP}:8000"
+  fi
+fi
+if [[ -z "$API_KEY" && -t 0 ]]; then
+  read -r -p "NGAV API key from Server UI Connect button: " API_KEY
+fi
+
+if [[ -n "$SERVER_URL" || -n "$API_KEY" ]]; then
+  SERVER_URL="$SERVER_URL" API_KEY="$API_KEY" ".venv/bin/python" - <<'PY'
+import os
+from pathlib import Path
+import yaml
+
+config_path = Path("config/config.yaml")
+raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+if os.environ.get("SERVER_URL"):
+    raw.setdefault("collector", {})["url"] = os.environ["SERVER_URL"].rstrip("/")
+raw.setdefault("collector", {})["api_key_path"] = "../agent/api_key.txt"
+config_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+api_key = os.environ.get("API_KEY", "").strip()
+if api_key:
+    key_path = Path("agent/api_key.txt")
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    key_path.write_text(api_key + "\\n", encoding="utf-8")
+PY
+fi
+
+if [[ "$SYSTEMD" == "1" ]]; then
   if [[ "$(id -u)" -ne 0 ]]; then
     echo "[error] --systemd requires sudo/root"
     exit 1
@@ -155,7 +211,10 @@ def write_windows_scripts(bundle_dir: Path) -> None:
   [switch]$Task,
   [string]$InstallDir = "$env:ProgramData\\NGAV-Agent",
   [string]$TaskName = "NGAV Agent",
-  [string]$WatchPaths = ""
+  [string]$WatchPaths = "",
+  [string]$ServerIp = "",
+  [string]$ServerUrl = "",
+  [string]$ApiKey = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -191,6 +250,44 @@ if ($Task) {
 & $Python -m venv .venv
 & .\\.venv\\Scripts\\python.exe -m pip install --upgrade pip
 & .\\.venv\\Scripts\\pip.exe install -r requirements-agent.txt
+
+if (-not $ServerUrl) {
+  if (-not $ServerIp) {
+    $ServerIp = Read-Host "NGAV server IP"
+  }
+  if ($ServerIp) {
+    $ServerUrl = "http://$ServerIp`:8000"
+  }
+}
+if (-not $ApiKey) {
+  $ApiKey = Read-Host "NGAV API key from Server UI Connect button"
+}
+
+if ($ServerUrl -or $ApiKey) {
+  $env:SERVER_URL = $ServerUrl
+  $env:API_KEY = $ApiKey
+  $ConfigureScript = Join-Path $Root "_configure_agent.py"
+  @'
+import os
+from pathlib import Path
+import yaml
+
+config_path = Path("config/config.yaml")
+raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+if os.environ.get("SERVER_URL"):
+    raw.setdefault("collector", {})["url"] = os.environ["SERVER_URL"].rstrip("/")
+raw.setdefault("collector", {})["api_key_path"] = "../agent/api_key.txt"
+config_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+api_key = os.environ.get("API_KEY", "").strip()
+if api_key:
+    key_path = Path("agent/api_key.txt")
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    key_path.write_text(api_key + "\\n", encoding="utf-8")
+'@ | Set-Content -Encoding UTF8 $ConfigureScript
+  & .\\.venv\\Scripts\\python.exe $ConfigureScript
+  Remove-Item -Force $ConfigureScript
+}
 
 if ($Task) {
   $runScript = Join-Path $InstallDir "run_agent.ps1"
@@ -254,22 +351,28 @@ Collector URL: `{collector_url.rstrip("/")}`
 
 ```bash
 chmod +x install_linux.sh run_agent.sh
-./install_linux.sh
+./install_linux.sh --server-ip SERVER_IP --api-key API_KEY
 ./run_agent.sh
 ```
 
 Install as a systemd service:
 
 ```bash
-sudo ./install_linux.sh --systemd
+sudo ./install_linux.sh --systemd --server-ip SERVER_IP --api-key API_KEY
 sudo systemctl status ngav-agent
+```
+
+You can also pass the full collector URL:
+
+```bash
+sudo ./install_linux.sh --systemd --server-url http://SERVER_IP:8000 --api-key API_KEY
 ```
 
 ## Windows PowerShell
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\\install_windows.ps1
+.\\install_windows.ps1 -ServerIp SERVER_IP -ApiKey API_KEY
 .\\run_agent.ps1
 ```
 
@@ -277,14 +380,14 @@ Install as a background startup task. Run PowerShell as Administrator:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\\install_windows.ps1 -Task
+.\\install_windows.ps1 -Task -ServerIp SERVER_IP -ApiKey API_KEY
 Get-ScheduledTask -TaskName "NGAV Agent"
 ```
 
 Add file watch paths to the startup task:
 
 ```powershell
-.\\install_windows.ps1 -Task -WatchPaths "C:\\Users,C:\\Windows\\Temp"
+.\\install_windows.ps1 -Task -ServerIp SERVER_IP -ApiKey API_KEY -WatchPaths "C:\\Users,C:\\Windows\\Temp"
 ```
 
 Uninstall the startup task and installed files:
@@ -307,7 +410,9 @@ Add paths at runtime:
 
 This bundle is sensor-only. Models stay on the NGAV server; this agent only sends telemetry to the collector.
 
-The agent stores its API key at `agent/api_key.txt` after first registration.
+Use the Server UI Connect button to generate `API_KEY`.
+
+The agent stores its API key at `agent/api_key.txt`.
 """
     (bundle_dir / "README_DEPLOY.md").write_text(text, encoding="utf-8")
 

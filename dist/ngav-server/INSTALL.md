@@ -38,13 +38,15 @@ The native installer downloads Elastic Linux tarballs directly from Elastic, so 
 /opt/ngav-elastic
 ```
 
-It configures Elasticsearch as single-node on `127.0.0.1:9200` and Kibana on `0.0.0.0:5601`.
+It configures Elasticsearch as single-node on `<SERVER_IP>:9200` and Kibana on `<SERVER_IP>:5601`.
+This makes ELK reachable through the server IP instead of only `localhost`.
 
 The installer will:
 
 - copy the server to `/opt/ngav-server`
 - create `/opt/ngav-server/.venv`
 - install `requirements.txt`
+- generate `/opt/ngav-server/config/config.yaml`
 - install and start native Elasticsearch/Kibana
 - create the `ngav-collector` systemd service
 - enable the service at boot
@@ -59,7 +61,20 @@ Replace `<SERVER_IP>` with your server IP:
 Collector API: http://<SERVER_IP>:8000
 NGAV Console:  http://<SERVER_IP>:8000/ui
 Kibana:        http://<SERVER_IP>:5601
+Elasticsearch: http://<SERVER_IP>:9200
 Agents API:    http://<SERVER_IP>:8000/agents
+```
+
+To bind ELK to a different address than the agent-facing server IP:
+
+```bash
+sudo scripts/install_server.sh --server-ip <SERVER_IP> --elastic-host <ELASTIC_IP>
+```
+
+To regenerate the server config during reinstall:
+
+```bash
+sudo scripts/install_server.sh --server-ip <SERVER_IP> --force-config
 ```
 
 ### Server Management
@@ -78,16 +93,16 @@ Check connected agents:
 curl http://<SERVER_IP>:8000/agents
 ```
 
-Uninstall server:
+Cleanly uninstall the server and native ELK:
 
 ```bash
-sudo scripts/uninstall_server.sh --stop-elastic
+sudo scripts/uninstall_server.sh
 ```
 
-Cleanly remove the server and all native ELK files/services/cache:
+Uninstall only the NGAV collector and keep native ELK running:
 
 ```bash
-sudo scripts/uninstall_server.sh --purge-elk
+sudo scripts/uninstall_server.sh --keep-elk
 ```
 
 ## 2. Agent Bundle
@@ -218,7 +233,7 @@ Allow inbound traffic on the server:
 ```text
 TCP 8000  NGAV collector and console
 TCP 5601  Kibana, optional
-TCP 9200  Elasticsearch, local/admin only
+TCP 9200  Elasticsearch, admin only
 ```
 
 Endpoint machines only need outbound access to:
