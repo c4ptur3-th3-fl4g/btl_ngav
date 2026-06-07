@@ -68,3 +68,20 @@ This bundle is sensor-only. Models stay on the NGAV server; this agent only send
 Use the Server UI Connect button to generate `API_KEY`.
 
 The agent stores its API key at `agent/api_key.txt`.
+
+## Test EMBER anomaly alert
+
+Run on a Windows endpoint after the agent has been installed and registered:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\test_ember_anomaly_alert_windows.ps1
+```
+
+Or pass values explicitly:
+
+```powershell
+.\test_ember_anomaly_alert_windows.ps1 -ServerUrl http://SERVER_IP:8000 -ApiKey API_KEY
+```
+
+This sends synthetic EMBER features to the server so the server-side EMBER model can produce an anomaly detection and trigger alert delivery.

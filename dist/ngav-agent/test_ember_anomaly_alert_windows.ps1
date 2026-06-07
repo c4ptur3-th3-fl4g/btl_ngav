@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 function Get-DefaultRoot {
-  $scriptRoot = Split-Path -Parent $MyInvocation.ScriptName
+  $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
   if ($scriptRoot -and (Test-Path (Join-Path $scriptRoot "config\config.yaml"))) {
     return $scriptRoot
   }
@@ -62,34 +62,27 @@ if (-not $Endpoint) {
   $Endpoint = $env:COMPUTERNAME
 }
 
-$os = Get-CimInstance Win32_OperatingSystem
+$features = @{}
+for ($i = 0; $i -lt 256; $i++) {
+  $features["histogram.$i"] = 999999.0
+  $features["byteentropy.$i"] = 999999.0
+}
+$features["general.size"] = 999999.0
+$features["general.vsize"] = 999999.0
+$features["general.has_debug"] = 1.0
+$features["strings.numstrings"] = 999999.0
+$features["strings.entropy"] = 999999.0
+$features["strings.urls"] = 999999.0
+$features["strings.registry"] = 999999.0
+
 $payload = @{
   endpoint = $Endpoint
-  event_type = "process_sample"
+  event_type = "ember_test_anomaly"
   timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
   data = @{
-    records = @(
-      @{
-        pid = 4242
-        ppid = 1000
-        name = "ngav-alert-test.exe"
-        exe = "$env:TEMP\ngav-alert-test.exe"
-        username = "$env:USERDOMAIN\$env:USERNAME"
-        status = "running"
-        platform = "windows"
-        cmdline_len = 240
-        num_threads = 64
-        memory_rss = 268435456
-        cpu_percent = 87.5
-        is_system_path = 0
-        is_temp_path = 1
-        create_time = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-        cmdline = "powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand <NGAV_TEST_ONLY>"
-        test_marker = "ngav_windows_alert_test"
-        os = $os.Caption
-        os_version = $os.Version
-      }
-    )
+    ember_features = $features
+    test_marker = "ngav_agent_ember_anomaly_alert_test"
+    note = "Synthetic EMBER features for testing server-side EMBER anomaly alert pipeline"
   }
 } | ConvertTo-Json -Depth 8
 
@@ -98,15 +91,27 @@ $headers = @{
   "X-API-Key" = $ApiKey
 }
 
-Write-Host "[info] sending NGAV test event to $ServerUrl/ingest"
-$response = Invoke-RestMethod -Method Post -Uri "$ServerUrl/ingest" -Headers $headers -Body $payload -TimeoutSec 20
+Write-Host "[info] sending EMBER anomaly test event to $ServerUrl/ingest"
+$response = Invoke-RestMethod -Method Post -Uri "$ServerUrl/ingest" -Headers $headers -Body $payload -TimeoutSec 30
 $response | ConvertTo-Json -Depth 8
 
+$hasAnomaly = $false
+if ($response.detections) {
+  foreach ($det in $response.detections) {
+    if ($det.is_anomaly -eq $true) {
+      $hasAnomaly = $true
+    }
+  }
+}
+
 Write-Host ""
-Write-Host "[ok] test event sent from endpoint: $Endpoint"
+if ($hasAnomaly) {
+  Write-Host "[ok] server returned an anomaly detection. Alert pipeline should run."
+} else {
+  Write-Host "[warn] server accepted the event, but no anomaly was returned."
+  Write-Host "[warn] Check that EMBER models exist on the server and collector was restarted after model/config changes."
+}
 Write-Host "[next] check:"
-Write-Host "  $ServerUrl/events?limit=5"
-Write-Host "  $ServerUrl/api/elastic/events?limit=5"
+Write-Host "  $ServerUrl/detections?limit=5&anomalies_only=true"
+Write-Host "  $ServerUrl/api/elastic/alerts?limit=5"
 Write-Host "  $ServerUrl/ui"
-Write-Host ""
-Write-Host "[note] Telegram/Discord alert is sent only if the server model marks this event as anomalous."
