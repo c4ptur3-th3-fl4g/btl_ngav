@@ -134,6 +134,23 @@ def _detect_event(evt: Dict[str, Any]) -> list:
         return []
     try:
         detections = [det.to_dict() for det in detector.detect_event(evt)]
+        anomaly_count = sum(1 for det in detections if det.get("is_anomaly"))
+        if detections:
+            summary = ", ".join(
+                f"{det.get('model_name')} score={float(det.get('score', 0.0)):.6f} "
+                f"threshold={float(det.get('threshold', 0.0)):.6f} anomaly={det.get('is_anomaly')}"
+                for det in detections
+            )
+            print(
+                f"[info] detection summary endpoint={evt.get('endpoint')} "
+                f"event_type={evt.get('event_type')} detections={len(detections)} "
+                f"anomalies={anomaly_count}: {summary}"
+            )
+        else:
+            print(
+                f"[info] detection summary endpoint={evt.get('endpoint')} "
+                f"event_type={evt.get('event_type')} detections=0 anomalies=0"
+            )
         for det in detections:
             _append_detection(det)
             try:

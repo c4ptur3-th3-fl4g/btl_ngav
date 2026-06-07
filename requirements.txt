@@ -10,3 +10,4 @@ watchdog
 fastapi
 uvicorn
 elasticsearch
+xgboost>=2.0
